@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.pytest_cache/
+*.sqlite
+*.sqlite3
+playwright_state.json

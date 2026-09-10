@@ -1,0 +1,9 @@
+.venv
+.env
+*.sqlite
+*.sqlite3
+playwright_state.json
+__pycache__
+.pytest_cache
+.git
+data/
