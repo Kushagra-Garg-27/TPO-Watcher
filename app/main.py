@@ -4,6 +4,10 @@ import sys
 from app.logging_config import setup_logging
 from app.monitoring.watcher import PlacementWatcher
 
+import uvicorn
+from app.api.app import app
+from app.config import settings
+
 async def main():
     setup_logging()
     
@@ -17,13 +21,23 @@ async def main():
     
     try:
         if args.baseline:
-            # Maybe manually set db flag and run once
-            watcher.db.set_baseline_initialized() # Actually, baseline happens automatically if table is empty. But let's leave it.
+            watcher.db.set_baseline_initialized()
             
         if args.once:
             await watcher.check_once()
         else:
-            await watcher.run_forever()
+            config = uvicorn.Config(
+                app=app,
+                host=settings.PUBLIC_HOST,
+                port=settings.PUBLIC_PORT,
+                log_level=settings.LOG_LEVEL.lower(),
+                access_log=False
+            )
+            server = uvicorn.Server(config)
+            await asyncio.gather(
+                watcher.run_forever(),
+                server.serve()
+            )
     except KeyboardInterrupt:
         pass
     finally:

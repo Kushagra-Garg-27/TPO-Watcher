@@ -30,6 +30,13 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
 
+    # Public V1 Web & Security Settings
+    SECRET_KEY: str = "tpo-watcher-secret-key-change-in-production"
+    BASE_URL: str = "http://127.0.0.1:8000"
+    PUBLIC_HOST: str = "127.0.0.1"
+    PUBLIC_PORT: int = 8000
+    COOKIE_SECURE: bool = False
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     def get_target_programs_list(self) -> List[str]:

@@ -11,14 +11,17 @@ logger = logging.getLogger(__name__)
 
 class EmailNotificationProvider(NotificationProvider):
     def _send_email(self, subject: str, html_content: str) -> bool:
-        if not settings.SMTP_HOST or not settings.SMTP_USERNAME:
-            logger.warning("Email configuration missing. Skipping email notification.")
+        return self._send_email_to(settings.EMAIL_TO, subject, html_content)
+
+    def _send_email_to(self, to_email: str, subject: str, html_content: str) -> bool:
+        if not settings.SMTP_HOST or not settings.SMTP_USERNAME or not to_email:
+            logger.warning("Email configuration or recipient missing. Skipping email notification.")
             return False
             
         msg = EmailMessage()
         msg['Subject'] = subject
-        msg['From'] = settings.EMAIL_FROM
-        msg['To'] = settings.EMAIL_TO
+        msg['From'] = settings.EMAIL_FROM or settings.SMTP_USERNAME
+        msg['To'] = to_email
         
         msg.set_content("Please enable HTML to view this email.")
         msg.add_alternative(html_content, subtype='html')
@@ -28,10 +31,10 @@ class EmailNotificationProvider(NotificationProvider):
                 server.starttls()
                 server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
                 server.send_message(msg)
-            logger.info(f"Email sent successfully: {subject}")
+            logger.info(f"Email sent successfully to {to_email}: {subject}")
             return True
         except Exception as e:
-            logger.error(f"Failed to send email: {e}")
+            logger.error(f"Failed to send email to {to_email}: {e}")
             return False
 
     def send_new_company_notification(self, company: CompanyRecord, target_match: bool) -> bool:

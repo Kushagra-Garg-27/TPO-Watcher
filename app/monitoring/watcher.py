@@ -11,6 +11,8 @@ from app.monitoring.detector import CompanyDetector
 from app.monitoring.scheduler import TimezoneScheduler
 from app.notifications.email import EmailNotificationProvider
 from app.tpo.models import CompanyRecord
+from app.subscribers.fanout import FanoutEngine
+from app.subscribers.worker import DeliveryWorker
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,8 @@ class PlacementWatcher:
         )
         
         self.target_programs = settings.get_target_programs_list()
+        self.fanout = FanoutEngine(self.db.users, self.db.deliveries)
+        self.delivery_worker = DeliveryWorker(self.db.deliveries, self.db.tokens, self.notifier)
 
     def _matches_target(self, company: dict) -> bool:
         if not self.target_programs:
@@ -110,15 +114,24 @@ class PlacementWatcher:
                 result = self.detector.process_fetched_companies(companies)
                 if result.new_companies:
                     logger.info(f"Newly detected companies ({len(result.new_companies)}): {[f'{c.company} (ID: {c.id})' for c in result.new_companies]}")
+                    for nc in result.new_companies:
+                        self.fanout.dispatch_opportunity(nc, "NEW")
                 if result.updated_companies:
                     logger.info(f"Updated companies ({len(result.updated_companies)}): {[f'{c[0].company} (ID: {c[0].id})' for c in result.updated_companies]}")
+                    for uc, changes in result.updated_companies:
+                        self.fanout.dispatch_opportunity(uc, "UPDATE")
                 if not result.new_companies and not result.updated_companies:
                     logger.info("No company changes detected in this check.")
                 
-                # 4. Process pending notifications
+                # 4. Process pending admin notifications (Independent safety channel preserved)
                 pending_count = len(self.db.get_pending_notifications())
-                logger.info(f"Pending notifications in queue: {pending_count}")
+                logger.info(f"Pending admin notifications in queue: {pending_count}")
                 await self._process_notifications()
+
+                # 5. Process student subscriber deliveries via recoverable lease worker
+                delivered_subs = await self.delivery_worker.process_batch_once()
+                if delivered_subs > 0:
+                    logger.info(f"Dispatched {delivered_subs} student subscriber notifications.")
                 
                 logger.info("Check iteration complete.")
                 break

@@ -8,6 +8,13 @@ import os
 
 logger = logging.getLogger(__name__)
 
+from app.database.migrations import run_migrations
+from app.database.sqlite_repository import (
+    SQLiteUserRepository,
+    SQLiteTokenRepository,
+    SQLiteDeliveryRepository
+)
+
 DB_PATH = os.environ.get("DB_PATH", "watcher.sqlite")
 
 class DatabaseRepository:
@@ -17,6 +24,10 @@ class DatabaseRepository:
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
         self._init_db()
+        run_migrations(self.db_path)
+        self.users = SQLiteUserRepository(self.db_path)
+        self.tokens = SQLiteTokenRepository(self.db_path)
+        self.deliveries = SQLiteDeliveryRepository(self.db_path)
 
     def _get_conn(self):
         conn = sqlite3.connect(self.db_path)
