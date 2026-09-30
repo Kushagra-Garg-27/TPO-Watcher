@@ -31,7 +31,6 @@ def test_client(tmp_path, monkeypatch):
     delivery_repo = SQLiteDeliveryRepository(db_path)
 
     monkeypatch.setattr("app.database.repository.DB_PATH", db_path)
-    monkeypatch.setattr("app.api.web_views.DB_PATH", db_path)
     app.dependency_overrides[get_db_repos] = lambda: (user_repo, token_repo)
 
     client = TestClient(app)

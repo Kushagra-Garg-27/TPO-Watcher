@@ -107,31 +107,23 @@ def verify_email(
     token_hash = hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
     token_row = token_repo.get_valid_token(token_hash, "SIGNUP_VERIFY")
 
+    from app.api.web_views import spa_response
+
     if not token_row:
-        return HTMLResponse(
-            content="""<!DOCTYPE html>
-<html><body style="font-family: sans-serif; text-align: center; padding: 50px;">
-    <h2 style="color: #d32f2f;">Invalid or Expired Link</h2>
-    <p>This verification link is invalid, already used, or has expired after 24 hours.</p>
-    <p><a href="/" style="color: #0366d6;">Register Again</a></p>
-</body></html>""",
-            status_code=status.HTTP_400_BAD_REQUEST
+        return spa_response(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            fallback_text="<h2>Invalid or Expired Link</h2><p>This verification link is invalid, already used, or has expired after 24 hours.</p>"
         )
 
     # Mark user verified and token used (one-time use)
     user_repo.set_verified(token_row["user_id"])
     token_repo.mark_token_used(token_row["id"])
 
-    return HTMLResponse(
-        content="""<!DOCTYPE html>
-<html><body style="font-family: sans-serif; text-align: center; padding: 50px; background-color: #f7f9fa;">
-    <div style="max-width: 500px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; border: 1px solid #e1e4e8; box-shadow: 0 2px 10px rgba(0,0,0,0.05);">
-        <h2 style="color: #2ea44f; margin-top: 0;">✓ Email Verified!</h2>
-        <p style="font-size: 16px; color: #333;">Your email subscription for <strong>VIT Pune 2028 TPO Alerts</strong> is now active.</p>
-        <p style="color: #666; font-size: 14px;">You will automatically receive an email alert whenever a company or internship matching your branch is scheduled.</p>
-    </div>
-</body></html>"""
+    return spa_response(
+        status_code=status.HTTP_200_OK,
+        fallback_text="<h2>✓ Email Verified!</h2><p>Your email subscription for VIT Pune 2028 TPO Alerts is now active.</p>"
     )
+
 
 @router.get("/unsubscribe", response_class=HTMLResponse)
 @router.post("/unsubscribe", response_class=HTMLResponse)
@@ -144,27 +136,19 @@ def unsubscribe(
     token_hash = hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
     token_row = token_repo.get_valid_token(token_hash, "UNSUBSCRIBE")
 
+    from app.api.web_views import spa_response
+
     if not token_row:
-        return HTMLResponse(
-            content="""<!DOCTYPE html>
-<html><body style="font-family: sans-serif; text-align: center; padding: 50px;">
-    <h2 style="color: #d32f2f;">Invalid or Expired Unsubscribe Link</h2>
-    <p>This unsubscribe link is invalid or has already been used.</p>
-</body></html>""",
-            status_code=status.HTTP_400_BAD_REQUEST
+        return spa_response(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            fallback_text="<h2>Invalid or Expired Unsubscribe Link</h2><p>This unsubscribe link is invalid or has already been used.</p>"
         )
 
     # Immediately unsubscribe user and cancel pending deliveries
     user_repo.set_unsubscribed(token_row["user_id"])
     token_repo.mark_token_used(token_row["id"])
 
-    return HTMLResponse(
-        content="""<!DOCTYPE html>
-<html><body style="font-family: sans-serif; text-align: center; padding: 50px; background-color: #f7f9fa;">
-    <div style="max-width: 500px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; border: 1px solid #e1e4e8;">
-        <h2 style="color: #333; margin-top: 0;">Unsubscribed Successfully</h2>
-        <p style="color: #666; font-size: 15px;">You have been unsubscribed from VIT TPO email alerts. Any pending notifications have been cancelled.</p>
-        <p style="font-size: 13px; color: #999;">If you ever want to re-subscribe, simply sign up again on the portal.</p>
-    </div>
-</body></html>"""
+    return spa_response(
+        status_code=status.HTTP_200_OK,
+        fallback_text="<h2>Unsubscribed Successfully</h2><p>You have been unsubscribed from VIT TPO email alerts. Any pending notifications have been cancelled.</p>"
     )
