@@ -224,7 +224,7 @@ export function SignupPage({ navigate }: SignupPageProps) {
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-3xl mx-auto">
             {[
-              { step: '01', title: 'Choose your branch', description: 'Select your engineering programme from the 9 canonical VIT Pune branches.' },
+              { step: '01', title: 'Choose your branch', description: 'Select your engineering programme from the 12 canonical VIT Pune branches.' },
               { step: '02', title: 'Choose opportunity types', description: 'Pick which types of opportunities you want to be notified about.' },
               { step: '03', title: 'Receive email alerts', description: 'Get notified by email whenever a matching TPO opportunity is detected.' },
             ].map(({ step, title, description }, i) => (

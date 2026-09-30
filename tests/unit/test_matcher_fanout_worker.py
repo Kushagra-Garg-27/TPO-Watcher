@@ -169,3 +169,62 @@ async def test_delivery_worker_processing(temp_fanout_db):
     import hashlib
     h = hashlib.sha256(raw_token_in_email.encode("utf-8")).hexdigest()
     assert token_repo.get_valid_token(h, "UNSUBSCRIBE") is not None
+
+
+def test_all_12_current_btech_programmes_exist_and_are_unique():
+    from app.subscribers.canonical import (
+        CanonicalBranch,
+        CANONICAL_BRANCH_DISPLAY,
+        CANONICAL_TO_TPO_STRINGS
+    )
+
+    expected_12_current = [
+        "VIT_CE",
+        "VIT_CSE_DS",
+        "VIT_IT",
+        "VIT_CSE_IOT_CS_BC",
+        "VIT_CSE_AI",
+        "VIT_CSE_AIML",
+        "VIT_AIDS",
+        "VIT_CE_SE",
+        "VIT_ENTC",
+        "VIT_ICE",
+        "VIT_MECH",
+        "VIT_CIVIL",
+    ]
+
+    assert len(expected_12_current) == 12
+
+    for b_str in expected_12_current:
+        branch_enum = CanonicalBranch(b_str)
+        assert branch_enum in CANONICAL_BRANCH_DISPLAY
+        assert branch_enum in CANONICAL_TO_TPO_STRINGS
+        assert len(CANONICAL_TO_TPO_STRINGS[branch_enum]) > 0
+        assert CANONICAL_BRANCH_DISPLAY[branch_enum].startswith("B.Tech ")
+
+    # Ensure historical branches are preserved for backward compatibility
+    assert CanonicalBranch.VIT_ELEC in CANONICAL_BRANCH_DISPLAY
+    assert CanonicalBranch.VIT_CS_AI in CANONICAL_BRANCH_DISPLAY
+
+
+def test_strict_matching_for_all_new_btech_branches():
+    from app.subscribers.canonical import extract_eligible_canonical_branches, CanonicalBranch
+
+    cases = [
+        ("VIT-BTech-Computer Science and Engineering (Data Science)", CanonicalBranch.VIT_CSE_DS),
+        ("VIT-BTech-Computer Science and Engineering (Internet of Things and Cyber Security Including Blockchain Technology)", CanonicalBranch.VIT_CSE_IOT_CS_BC),
+        ("VIT-BTech-Instrumentation and Control Engineering", CanonicalBranch.VIT_ICE),
+        ("VIT-BTech-Computer Engineering (Software Engineering)", CanonicalBranch.VIT_CE_SE),
+        ("VIT-BTech-Civil Engineering", CanonicalBranch.VIT_CIVIL),
+    ]
+
+    for tpo_str, expected_branch in cases:
+        branches = extract_eligible_canonical_branches(tpo_str, tpo_str, "VIT")
+        assert expected_branch in branches
+        # Strict isolation: must NOT contain standard CE or IT or others
+        if expected_branch != CanonicalBranch.VIT_CE:
+            assert CanonicalBranch.VIT_CE not in branches
+        if expected_branch != CanonicalBranch.VIT_IT:
+            assert CanonicalBranch.VIT_IT not in branches
+        if expected_branch != CanonicalBranch.VIT_CSE_AI:
+            assert CanonicalBranch.VIT_CSE_AI not in branches

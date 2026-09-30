@@ -55,13 +55,18 @@ export function BranchSelector({ value, onChange, error, id }: BranchSelectorPro
     setSearch('')
   }
 
-  // Filter branches by search
+  // Filter branches by search (checks label, value, and searchTerms)
+  const searchLower = search.trim().toLowerCase()
   const filteredGroups = BRANCH_GROUPS.map(group => ({
     ...group,
     branches: group.branches.filter(bv => {
       const branch = CANONICAL_BRANCHES.find(b => b.value === bv)
       if (!branch) return false
-      return branch.label.toLowerCase().includes(search.toLowerCase())
+      if (!searchLower) return true
+      const matchLabel = branch.label.toLowerCase().includes(searchLower)
+      const matchValue = branch.value.toLowerCase().includes(searchLower)
+      const matchTerms = branch.searchTerms.some(term => term.toLowerCase().includes(searchLower))
+      return matchLabel || matchValue || matchTerms
     })
   })).filter(group => group.branches.length > 0)
 

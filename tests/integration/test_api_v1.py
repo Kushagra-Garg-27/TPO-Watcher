@@ -271,3 +271,60 @@ def test_smtp_safety_guardrail_prevents_real_email_dispatch(test_client):
     from app.notifications.email import EmailNotificationProvider
     provider = EmailNotificationProvider()
     assert provider._send_email_to("trap_test@vit.edu", "Test Subject", "<p>Test</p>") is False
+
+
+def test_signup_all_12_current_btech_branches_accepted_and_invalid_rejected(test_client):
+    """
+    Verifies that the signup API accepts all 12 current VIT Pune B.Tech branches:
+    1. VIT_CE
+    2. VIT_CSE_DS
+    3. VIT_IT
+    4. VIT_CSE_IOT_CS_BC
+    5. VIT_CSE_AI
+    6. VIT_CSE_AIML
+    7. VIT_AIDS
+    8. VIT_CE_SE
+    9. VIT_ENTC
+    10. VIT_ICE
+    11. VIT_MECH
+    12. VIT_CIVIL
+    And rejects non-existent or invalid branch identifiers with 422.
+    """
+    all_12_branches = [
+        "VIT_CE",
+        "VIT_CSE_DS",
+        "VIT_IT",
+        "VIT_CSE_IOT_CS_BC",
+        "VIT_CSE_AI",
+        "VIT_CSE_AIML",
+        "VIT_AIDS",
+        "VIT_CE_SE",
+        "VIT_ENTC",
+        "VIT_ICE",
+        "VIT_MECH",
+        "VIT_CIVIL",
+    ]
+
+    for idx, branch in enumerate(all_12_branches):
+        email = f"student_{idx:02d}_{branch.lower()}@vit.edu"
+        res = test_client.post("/api/v1/auth/signup", json={
+            "email": email,
+            "graduation_year": 2028,
+            "branch_canonical": branch
+        })
+        assert res.status_code == 201, f"Branch {branch} should be accepted, got {res.status_code}: {res.text}"
+        assert res.json()["status"] == "success"
+
+        # Verify persisted user has exact branch
+        user = test_client.user_repo.get_by_email(email)
+        assert user is not None
+        assert user["branch_canonical"] == branch
+
+    # Verify invalid branch rejection
+    res_invalid = test_client.post("/api/v1/auth/signup", json={
+        "email": "invalid_branch_user@vit.edu",
+        "graduation_year": 2028,
+        "branch_canonical": "VIT_INVALID_BRANCH"
+    })
+    assert res_invalid.status_code == 422
+    assert "Invalid branch" in res_invalid.text
