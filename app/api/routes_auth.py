@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from app.database.models import UserCreate
 from app.database.interfaces import UserRepositoryProtocol, TokenRepositoryProtocol
 from app.subscribers.canonical import CanonicalBranch
-from app.api.email_service import EmailService
+from app.api.email_service import EmailService, get_email_service
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ def get_db_repos():
 def signup(
     payload: UserCreate,
     repos = Depends(get_db_repos),
-    email_service: EmailService = Depends(lambda: EmailService())
+    email_service: EmailService = Depends(get_email_service)
 ):
     user_repo, token_repo = repos
 

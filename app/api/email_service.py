@@ -65,3 +65,7 @@ class EmailService:
 </body>
 </html>"""
         return self.notifier._send_email_to(to_email, subject, html)
+
+
+def get_email_service() -> EmailService:
+    return EmailService()

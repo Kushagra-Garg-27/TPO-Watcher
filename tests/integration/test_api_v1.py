@@ -12,6 +12,31 @@ from app.database.sqlite_repository import (
     SQLiteDeliveryRepository
 )
 from app.api.routes_auth import get_db_repos
+from app.api.email_service import get_email_service
+
+class FakeEmailService:
+    """In-memory email service sink that captures dispatches without network calls."""
+    def __init__(self):
+        self.sent_emails = []
+
+    def send_verification_email(self, to_email: str, raw_token: str) -> bool:
+        self.sent_emails.append({
+            "type": "SIGNUP_VERIFY",
+            "to_email": to_email,
+            "raw_token": raw_token
+        })
+        return True
+
+    def send_preference_link_email(self, to_email: str, raw_token: str) -> bool:
+        self.sent_emails.append({
+            "type": "MANAGE_PREFS",
+            "to_email": to_email,
+            "raw_token": raw_token
+        })
+        return True
+
+    def clear(self):
+        self.sent_emails.clear()
 
 @pytest.fixture
 def test_client(tmp_path, monkeypatch):
@@ -30,14 +55,19 @@ def test_client(tmp_path, monkeypatch):
     token_repo = SQLiteTokenRepository(db_path)
     delivery_repo = SQLiteDeliveryRepository(db_path)
 
+    # In-memory fake email service sink
+    fake_email_service = FakeEmailService()
+
     monkeypatch.setattr("app.database.repository.DB_PATH", db_path)
     app.dependency_overrides[get_db_repos] = lambda: (user_repo, token_repo)
+    app.dependency_overrides[get_email_service] = lambda: fake_email_service
 
     client = TestClient(app)
     client.db_path = db_path
     client.user_repo = user_repo
     client.token_repo = token_repo
     client.delivery_repo = delivery_repo
+    client.fake_email = fake_email_service
     yield client
     app.dependency_overrides.clear()
 
@@ -61,6 +91,11 @@ def test_signup_validation(test_client):
     })
     assert res.status_code == 201
     assert "Verification link sent" in res.json()["message"]
+
+    # Verify fake email sink captured verification email without touching SMTP
+    assert len(test_client.fake_email.sent_emails) == 1
+    assert test_client.fake_email.sent_emails[0]["to_email"] == "student2028@vit.edu"
+    assert test_client.fake_email.sent_emails[0]["type"] == "SIGNUP_VERIFY"
 
     # 2. Rejection of graduation year != 2028
     res_bad_year = test_client.post("/api/v1/auth/signup", json={
@@ -86,6 +121,12 @@ def test_verification_flow(test_client):
         "graduation_year": 2028,
         "branch_canonical": "VIT_IT"
     })
+
+    # Verify email sink captured the verification link
+    assert any(
+        e["to_email"] == "verify_me@vit.edu" and e["type"] == "SIGNUP_VERIFY"
+        for e in test_client.fake_email.sent_emails
+    )
 
     user = test_client.user_repo.get_by_email("verify_me@vit.edu")
     assert user["is_verified"] == 0
@@ -191,3 +232,42 @@ def test_preference_management_lifecycle(test_client):
     assert updated_prefs["pref_internship"] == 1
     assert updated_prefs["pref_placement"] == 0
     assert updated_prefs["pref_ppo"] == 0
+
+    # 5. Request fresh preference access link (dispatches MANAGE_PREFS email to fake sink)
+    res_req = test_client.post("/api/v1/preferences/request-link", json={"email": "pref_test@vit.edu"})
+    assert res_req.status_code == 200
+    assert any(
+        e["to_email"] == "pref_test@vit.edu" and e["type"] == "MANAGE_PREFS"
+        for e in test_client.fake_email.sent_emails
+    )
+
+
+def test_smtp_safety_guardrail_prevents_real_email_dispatch(test_client):
+    """
+    HARD REGRESSION TEST: Proves integration tests never invoke real SMTP.
+    Verifies that:
+    1. Public endpoints route dispatches through in-memory FakeEmailService sink.
+    2. Any direct invocation of real EmailNotificationProvider._send_email_to triggers the safety trap.
+    """
+    initial_sent_count = len(test_client.fake_email.sent_emails)
+
+    # 1. Signup routes through fake sink
+    res_signup = test_client.post("/api/v1/auth/signup", json={
+        "email": "safetest2028@vit.edu",
+        "graduation_year": 2028,
+        "branch_canonical": "VIT_CE"
+    })
+    assert res_signup.status_code == 201
+    assert len(test_client.fake_email.sent_emails) == initial_sent_count + 1
+    assert test_client.fake_email.sent_emails[-1]["to_email"] == "safetest2028@vit.edu"
+    assert test_client.fake_email.sent_emails[-1]["type"] == "SIGNUP_VERIFY"
+
+    # 2. Hard structural trap: prove that unmocked real smtplib.SMTP raises RuntimeError
+    import smtplib
+    with pytest.raises(RuntimeError, match="CRITICAL TEST GUARDRAIL TRIGGERED"):
+        smtplib.SMTP("smtp.gmail.com", 587)
+
+    # 3. Prove that EmailNotificationProvider._send_email_to fails safely when trap blocks SMTP
+    from app.notifications.email import EmailNotificationProvider
+    provider = EmailNotificationProvider()
+    assert provider._send_email_to("trap_test@vit.edu", "Test Subject", "<p>Test</p>") is False

@@ -11,7 +11,7 @@ from app.config import settings
 from app.database.models import PreferenceUpdate, PreferenceResponse
 from app.database.interfaces import UserRepositoryProtocol, TokenRepositoryProtocol
 from app.api.session import create_session_token, verify_session_token
-from app.api.email_service import EmailService
+from app.api.email_service import EmailService, get_email_service
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ def exchange_magic_link_for_session(
 def request_preference_link(
     payload: RequestLinkPayload,
     repos = Depends(get_db_repos),
-    email_service: EmailService = Depends(lambda: EmailService())
+    email_service: EmailService = Depends(get_email_service)
 ):
     """
     Requests a fresh 15-minute access link sent directly to the student's email.
