@@ -18,3 +18,25 @@ def guard_live_smtp(monkeypatch):
     monkeypatch.setattr(smtplib, "SMTP", _blocked_smtp)
     if hasattr(smtplib, "SMTP_SSL"):
         monkeypatch.setattr(smtplib, "SMTP_SSL", _blocked_smtp)
+
+@pytest.fixture(autouse=True)
+def reset_security_state():
+    """
+    Resets in-process rate limiter and session revocation state between test runs
+    to guarantee test isolation and prevent cascading rate-limit triggers.
+    """
+    try:
+        from app.api.rate_limiter import limiter
+        from app.api.session import reset_session_revocations
+        limiter.reset()
+        reset_session_revocations()
+    except ImportError:
+        pass
+    yield
+    try:
+        from app.api.rate_limiter import limiter
+        from app.api.session import reset_session_revocations
+        limiter.reset()
+        reset_session_revocations()
+    except ImportError:
+        pass

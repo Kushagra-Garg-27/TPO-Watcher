@@ -35,7 +35,17 @@ class Settings(BaseSettings):
     BASE_URL: str = "http://127.0.0.1:8000"
     PUBLIC_HOST: str = "127.0.0.1"
     PUBLIC_PORT: int = 8000
-    COOKIE_SECURE: bool = False
+    COOKIE_SECURE: bool = True
+
+    # Rate Limiting Configuration (Per minute or per window)
+    RATE_LIMIT_SIGNUP_PER_IP: int = 30
+    RATE_LIMIT_SIGNUP_PER_EMAIL: int = 5
+    RATE_LIMIT_MAGIC_LINK_PER_IP: int = 30
+    RATE_LIMIT_MAGIC_LINK_PER_EMAIL: int = 5
+    RATE_LIMIT_VERIFY_PER_IP: int = 30
+    RATE_LIMIT_EXCHANGE_PER_IP: int = 30
+    RATE_LIMIT_UNSUBSCRIBE_PER_IP: int = 30
+    RATE_LIMIT_PREF_UPDATE_PER_IP: int = 30
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
