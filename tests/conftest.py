@@ -20,6 +20,16 @@ def guard_live_smtp(monkeypatch):
         monkeypatch.setattr(smtplib, "SMTP_SSL", _blocked_smtp)
 
 @pytest.fixture(autouse=True)
+def guard_live_database(tmp_path, monkeypatch):
+    """
+    CRITICAL SAFETY GUARDRAIL:
+    Prevents any test from writing to or reading from the root watcher.sqlite database.
+    Redirects the default DB_PATH to an isolated temporary test database.
+    """
+    test_db = str(tmp_path / "test_isolated_default.sqlite")
+    monkeypatch.setattr("app.database.repository.DB_PATH", test_db)
+
+@pytest.fixture(autouse=True)
 def reset_security_state():
     """
     Resets in-process rate limiter and session revocation state between test runs

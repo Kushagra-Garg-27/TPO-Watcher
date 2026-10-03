@@ -2,7 +2,7 @@ import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Set
 from app.tpo.models import CompanyRecord
 import os
 
@@ -90,6 +90,88 @@ class DatabaseRepository:
             cursor = conn.execute("SELECT * FROM companies WHERE id = ?", (str(company_id),))
             row = cursor.fetchone()
             return dict(row) if row else None
+
+    def get_active_opportunities(self, limit: int = 5) -> List[Dict[str, Any]]:
+        with self._get_conn() as conn:
+            cursor = conn.execute("""
+                SELECT
+                    id,
+                    company,
+                    max_package,
+                    min_package,
+                    placement_type,
+                    registration_end,
+                    eligible_programs,
+                    company_type,
+                    is_active,
+                    first_seen_at
+                FROM companies
+                WHERE is_active = 'True'
+                ORDER BY first_seen_at DESC, id DESC
+                LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    def deactivate_missing_companies(self, current_active_ids: Set[str]) -> List[str]:
+        """
+        Reconciles database active records against an authoritative incoming feed.
+        Marks records currently having is_active = 'True' as 'False' if their ID
+        is absent from current_active_ids.
+
+        Safety invariants:
+        - Never deactivates any records if current_active_ids is empty.
+        - Never touches records with is_active = 'False' or is_active IS NULL.
+        - Never deletes records.
+        - Preserves first_seen_at, last_seen_at, raw_data_json, and notification history.
+        - Transactionally safe.
+
+        Returns the list of deactivated company IDs.
+        """
+        if not current_active_ids:
+            logger.warning(
+                "deactivate_missing_companies called with empty current_active_ids. "
+                "Safety guardrail triggered: skipping deactivation to prevent accidental database wipe."
+            )
+            return []
+
+        active_id_strs = {str(cid).strip() for cid in current_active_ids if cid}
+        if not active_id_strs:
+            return []
+
+        with self._get_conn() as conn:
+            placeholders = ",".join("?" for _ in active_id_strs)
+            cursor = conn.execute(
+                f"""
+                SELECT id, company 
+                FROM companies 
+                WHERE is_active = 'True' AND id NOT IN ({placeholders})
+                """,
+                tuple(active_id_strs)
+            )
+            stale_rows = cursor.fetchall()
+            if not stale_rows:
+                return []
+
+            deactivated_ids = [str(r["id"]) for r in stale_rows]
+            deact_placeholders = ",".join("?" for _ in deactivated_ids)
+            conn.execute(
+                f"""
+                UPDATE companies 
+                SET is_active = 'False' 
+                WHERE id IN ({deact_placeholders})
+                """,
+                tuple(deactivated_ids)
+            )
+            conn.commit()
+
+            for r in stale_rows:
+                logger.info(
+                    f"Feed reconciliation: company '{r['company']}' (ID: {r['id']}) "
+                    f"absent from authoritative source feed. Marked is_active = 'False'."
+                )
+
+            return deactivated_ids
 
     def upsert_company(self, record: CompanyRecord, is_new: bool = False, notified_at: Optional[datetime] = None):
         with self._get_conn() as conn:

@@ -92,7 +92,7 @@ class TPOClient:
             return api_response.company_list
             
         except PlaywrightError as e:
-            if "login" in page.url:
+            if "login" in page.url or page.url.rstrip("/") == "https://tpo.vierp.in" or await page.locator("input[type='password']").count() > 0:
                 logger.warning("Redirected to login page. Session expired.")
                 raise AuthenticationError("Session expired (redirected to login)")
             logger.error(f"Playwright error in fetch_companies: {e}")

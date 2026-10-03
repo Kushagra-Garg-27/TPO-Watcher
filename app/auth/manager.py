@@ -117,7 +117,11 @@ class AuthManager:
         try:
             logger.info("Checking authentication by navigating to home page...")
             await self.page.goto(HOME_URL, wait_until="domcontentloaded", timeout=15000)
-            await self.page.wait_for_timeout(2000)
+            await self.page.wait_for_timeout(2500)
+            if self.page.url.rstrip("/") == "https://tpo.vierp.in":
+                return False
+            if await self.page.locator("input[type='password']").count() > 0:
+                return False
             if "home" in self.page.url or "company-dashboard" in self.page.url:
                 return True
             return False

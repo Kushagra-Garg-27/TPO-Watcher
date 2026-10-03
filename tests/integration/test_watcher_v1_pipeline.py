@@ -15,7 +15,7 @@ def temp_watcher_db(tmp_path):
 
 @pytest.mark.asyncio
 async def test_end_to_end_watcher_with_v1_fanout_and_admin_notification(temp_watcher_db):
-    watcher = PlacementWatcher()
+    watcher = PlacementWatcher(db=temp_watcher_db)
     watcher.db = temp_watcher_db
     watcher.detector = CompanyDetector(temp_watcher_db)
     # Hook repos

@@ -6,6 +6,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from app.api.routes_auth import router as auth_router
 from app.api.routes_preferences import router as pref_router
+from app.api.routes_opportunities import router as opps_router
 from app.api.web_views import router as views_router
 from app.health.server import router as health_router
 
@@ -32,6 +33,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(pref_router)
+    app.include_router(opps_router)
 
     # Mount the built React assets under /assets (Vite output) BEFORE views_router catchall
     if STATIC_DIR.exists():

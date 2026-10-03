@@ -73,7 +73,7 @@ def test_simulated_new_company_and_no_duplicates(temp_db):
 
 @pytest.mark.asyncio
 async def test_notification_retry_lifecycle(temp_db):
-    watcher = PlacementWatcher()
+    watcher = PlacementWatcher(db=temp_db)
     watcher.db = temp_db
     watcher.detector = CompanyDetector(temp_db)
     
@@ -105,7 +105,7 @@ async def test_notification_retry_lifecycle(temp_db):
 
 @pytest.mark.asyncio
 async def test_api_failure_safety_scenarios(temp_db):
-    watcher = PlacementWatcher()
+    watcher = PlacementWatcher(db=temp_db)
     watcher.db = temp_db
     watcher.detector = CompanyDetector(temp_db)
     
@@ -129,7 +129,7 @@ async def test_api_failure_safety_scenarios(temp_db):
 
 @pytest.mark.asyncio
 async def test_authentication_recovery_flow(temp_db):
-    watcher = PlacementWatcher()
+    watcher = PlacementWatcher(db=temp_db)
     watcher.db = temp_db
     watcher.detector = CompanyDetector(temp_db)
     

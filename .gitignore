@@ -5,6 +5,8 @@ __pycache__/
 .pytest_cache/
 *.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
 playwright_state.json
 .venv/
 .freebuff/

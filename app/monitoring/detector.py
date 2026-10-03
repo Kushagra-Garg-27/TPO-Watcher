@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 class DetectionResult:
     new_companies: List[CompanyRecord] = field(default_factory=list)
     updated_companies: List[Tuple[CompanyRecord, List[str]]] = field(default_factory=list)
+    deactivated_companies: List[str] = field(default_factory=list)
 
 class CompanyDetector:
     def __init__(self, db: DatabaseRepository):
@@ -45,6 +46,19 @@ class CompanyDetector:
                 # We always upsert to keep raw_data_json and last_seen_at fresh.
                 self.db.upsert_company(company)
                     
+        # Authoritative Feed Reconciliation
+        # Only reconcile if companies feed is non-empty (safety guardrail against anomalous empty fetches)
+        if companies:
+            if hasattr(self.db, "deactivate_missing_companies"):
+                incoming_ids = {str(c.id) for c in companies}
+                deactivated = self.db.deactivate_missing_companies(incoming_ids)
+                result.deactivated_companies = deactivated
+        else:
+            logger.warning(
+                "process_fetched_companies received empty companies list. "
+                "Preserving existing active database state in accordance with safety invariants."
+            )
+
         if is_baseline:
             self.db.set_baseline_initialized()
             

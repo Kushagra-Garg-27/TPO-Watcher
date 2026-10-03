@@ -3,6 +3,7 @@ import asyncio
 import logging
 import json
 from datetime import datetime, timezone
+from typing import Optional
 from app.config import settings
 from app.auth.manager import AuthManager
 from app.tpo.client import TPOClient, AuthenticationError
@@ -17,8 +18,13 @@ from app.subscribers.worker import DeliveryWorker
 logger = logging.getLogger(__name__)
 
 class PlacementWatcher:
-    def __init__(self):
-        self.db = DatabaseRepository()
+    def __init__(self, db: Optional[DatabaseRepository] = None, db_path: Optional[str] = None):
+        if db is not None:
+            self.db = db
+        elif db_path is not None:
+            self.db = DatabaseRepository(db_path)
+        else:
+            self.db = DatabaseRepository()
         self.auth = AuthManager()
         self.detector = CompanyDetector(self.db)
         self.notifier = EmailNotificationProvider()
@@ -120,7 +126,9 @@ class PlacementWatcher:
                     logger.info(f"Updated companies ({len(result.updated_companies)}): {[f'{c[0].company} (ID: {c[0].id})' for c in result.updated_companies]}")
                     for uc, changes in result.updated_companies:
                         self.fanout.dispatch_opportunity(uc, "UPDATE")
-                if not result.new_companies and not result.updated_companies:
+                if result.deactivated_companies:
+                    logger.info(f"Reconciled/deactivated companies absent from feed ({len(result.deactivated_companies)}): {result.deactivated_companies}")
+                if not result.new_companies and not result.updated_companies and not result.deactivated_companies:
                     logger.info("No company changes detected in this check.")
                 
                 # 4. Process pending admin notifications (Independent safety channel preserved)
