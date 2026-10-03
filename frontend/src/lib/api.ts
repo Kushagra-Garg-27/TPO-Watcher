@@ -27,6 +27,19 @@ export interface PreferencesResponse {
   pref_ppo: boolean
 }
 
+export interface Opportunity {
+  id: string
+  company: string
+  max_package: string | null
+  min_package: string | null
+  placement_type: string | null
+  registration_end: string | null
+  eligible_programs: string | null
+  company_type: string | null
+  is_active: string | null
+  first_seen_at: string | null
+}
+
 export interface ApiResult<T = null> {
   ok: boolean
   data?: T
@@ -89,5 +102,9 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(payload),
     })
+  },
+
+  async getOpportunities(): Promise<ApiResult<Opportunity[]>> {
+    return request('/api/v1/opportunities')
   },
 }

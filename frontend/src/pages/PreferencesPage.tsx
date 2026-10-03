@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Bell, Loader2, CheckCircle2, AlertCircle,
-  ArrowLeft, Settings, GraduationCap
+  Loader2, CheckCircle2, AlertCircle,
+  ArrowLeft, Mail, ShieldCheck
 } from 'lucide-react'
 import { PreferenceCards } from '../components/PreferenceCards'
 import { api, type PreferencesResponse } from '../lib/api'
 import { cn, isValidEmail } from '../lib/utils'
 import { getBranchLabel } from '../lib/branches'
+import { Footer } from '../components/Footer'
 
 interface PreferencesPageProps {
   navigate: (path: string) => void
@@ -34,7 +35,7 @@ export function PreferencesPage({ navigate }: PreferencesPageProps) {
   const [saveState, setSaveState] = useState<'idle' | 'loading' | 'saved' | 'error'>('idle')
   const [saveMsg, setSaveMsg] = useState('')
 
-  // Try to load preferences (will 401 if no session cookie)
+  // Load preferences (will 401 if no valid session cookie)
   useEffect(() => {
     async function loadPrefs() {
       const result = await api.getPreferences()
@@ -47,8 +48,6 @@ export function PreferencesPage({ navigate }: PreferencesPageProps) {
         })
         setPageState('loaded')
       } else if (result.status === 401 || !result.status) {
-        // 401 = not authenticated; no status = network error (dev mode without backend)
-        // Both cases: prompt for magic link
         setPageState('request-link')
       } else {
         setLoadError(result.error || 'Failed to load preferences.')
@@ -63,11 +62,11 @@ export function PreferencesPage({ navigate }: PreferencesPageProps) {
     setReqError('')
 
     if (!reqEmail.trim()) {
-      setReqError('Email address is required.')
+      setReqError('VIT email address is required.')
       return
     }
     if (!isValidEmail(reqEmail)) {
-      setReqError('Enter a valid email address.')
+      setReqError('Enter a valid VIT email address.')
       return
     }
 
@@ -75,7 +74,7 @@ export function PreferencesPage({ navigate }: PreferencesPageProps) {
     await api.requestPreferenceLink(reqEmail.trim().toLowerCase())
     setReqLoading(false)
 
-    // Always show success (security: don't reveal if email exists)
+    // Uniform response to prevent email enumeration
     setPageState('link-sent')
   }
 
@@ -88,283 +87,288 @@ export function PreferencesPage({ navigate }: PreferencesPageProps) {
     if (result.ok) {
       setSaveState('saved')
       setSaveMsg('Preferences updated successfully.')
-      setTimeout(() => setSaveState('idle'), 3000)
+      setTimeout(() => setSaveState('idle'), 3500)
     } else {
       setSaveState('error')
-      setSaveMsg(result.error || 'Failed to save. Please try again.')
+      setSaveMsg(result.error || 'Failed to save preferences. Please try again.')
     }
   }
 
   function prefChange(id: 'pref_internship' | 'pref_placement' | 'pref_ppo', val: boolean) {
-    setPrefs(p => ({ ...p, [id]: val }))
+    setPrefs((p) => ({ ...p, [id]: val }))
     if (saveState === 'saved') setSaveState('idle')
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 pt-14">
-      <div className="section-container py-12">
-        <div className="max-w-lg mx-auto">
-          {/* Back button */}
-          <button
-            type="button"
-            onClick={() => navigate('/')}
-            className="btn-ghost mb-6 -ml-2"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            Back to home
-          </button>
+    <div className="min-h-screen bg-background text-foreground flex flex-col justify-between pt-24">
+      <div className="section-container py-12 flex-1 w-full max-w-2xl mx-auto">
+        {/* Back navigation */}
+        <button
+          type="button"
+          onClick={() => navigate('/')}
+          className="btn-ghost mb-8 -ml-2 text-xs font-mono tracking-widest uppercase flex items-center gap-2"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          BACK TO HOME
+        </button>
 
-          <AnimatePresence mode="wait">
-            {/* ── Loading ─────────────────────────────── */}
-            {pageState === 'loading' && (
-              <motion.div
-                key="loading"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="flex items-center justify-center py-20"
-              >
-                <Loader2 className="h-8 w-8 text-brand-500 animate-spin" />
-              </motion.div>
-            )}
+        <AnimatePresence mode="wait">
+          {/* ── 01: LOADING ───────────────────────────────────────────── */}
+          {pageState === 'loading' && (
+            <motion.div
+              key="loading"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="flex flex-col items-center justify-center py-24 text-center"
+            >
+              <Loader2 className="h-8 w-8 text-accent animate-spin mb-4" />
+              <p className="text-xs font-mono uppercase tracking-widest text-muted">
+                VERIFYING ACTIVE SESSION...
+              </p>
+            </motion.div>
+          )}
 
-            {/* ── Request link ────────────────────────── */}
-            {pageState === 'request-link' && (
-              <motion.div
-                key="request-link"
-                initial={{ opacity: 0, y: 16 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.4 }}
-              >
-                <div className="flex items-center gap-3 mb-6">
-                  <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-100">
-                    <Settings className="h-5 w-5 text-brand-600" />
-                  </span>
-                  <div>
-                    <h1 className="text-xl font-bold text-slate-900">Manage your preferences</h1>
-                    <p className="text-sm text-slate-500">Secure access, no password required</p>
-                  </div>
-                </div>
+          {/* ── 02: REQUEST MAGIC LINK ────────────────────────────────── */}
+          {pageState === 'request-link' && (
+            <motion.div
+              key="request-link"
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.35 }}
+            >
+              <div className="mb-8">
+                <span className="text-[11px] font-mono tracking-[0.25em] text-accent uppercase block mb-2 font-semibold">
+                  IDENTITY VERIFICATION
+                </span>
+                <h1 className="font-display text-4xl sm:text-5xl uppercase text-foreground leading-tight tracking-tight">
+                  MANAGE PREFERENCES
+                </h1>
+                <p className="mt-3 text-sm text-muted font-light leading-relaxed font-sans">
+                  To protect your subscription without requiring passwords, enter your registered email. We’ll send a secure single-use 15-minute access link.
+                </p>
+              </div>
 
-                <div className="card p-6">
-                  <p className="text-sm text-slate-600 leading-relaxed mb-5">
-                    Enter your registered VIT email to receive a single-use, 15-minute secure access link.
-                    Your TPO credentials are never requested.
-                  </p>
-
-                  <form onSubmit={handleRequestLink} noValidate className="space-y-4">
-                    <div>
-                      <label htmlFor="req-email" className="block text-sm font-medium text-slate-700 mb-1.5">
-                        Registered email address
-                      </label>
-                      <input
-                        id="req-email"
-                        type="email"
-                        autoComplete="email"
-                        inputMode="email"
-                        value={reqEmail}
-                        onChange={e => {
-                          setReqEmail(e.target.value)
-                          if (reqError) setReqError('')
-                        }}
-                        placeholder="firstname.lastname@vit.edu"
-                        className={cn('input-base', reqError && 'error')}
-                        aria-invalid={!!reqError}
-                        aria-describedby={reqError ? 'req-email-error' : undefined}
-                        disabled={reqLoading}
-                      />
-                      {reqError && (
-                        <motion.p
-                          id="req-email-error"
-                          initial={{ opacity: 0, y: -4 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          className="mt-1.5 text-xs text-danger-600 flex items-center gap-1"
-                          role="alert"
-                        >
-                          <AlertCircle className="h-3 w-3" />
-                          {reqError}
-                        </motion.p>
-                      )}
+              <div className="card bg-surface-1 border border-line-strong p-6 sm:p-8 rounded-xl shadow-[0_20px_50px_rgba(0,0,0,0.8)]">
+                <form onSubmit={handleRequestLink} noValidate className="space-y-5">
+                  {reqError && (
+                    <div className="alert-error" role="alert">
+                      <AlertCircle className="h-4 w-4 shrink-0 text-danger-500" />
+                      <span>{reqError}</span>
                     </div>
+                  )}
 
-                    <button
-                      type="submit"
+                  <div>
+                    <label
+                      htmlFor="req-email"
+                      className="block text-xs font-mono uppercase tracking-wider text-muted mb-2"
+                    >
+                      REGISTERED VIT EMAIL
+                    </label>
+                    <input
+                      id="req-email"
+                      type="email"
+                      autoComplete="email"
+                      inputMode="email"
+                      value={reqEmail}
+                      onChange={(e) => {
+                        setReqEmail(e.target.value)
+                        if (reqError) setReqError('')
+                      }}
+                      placeholder="firstname.lastname@vit.edu"
+                      className={cn('input-base font-sans', reqError && 'error')}
                       disabled={reqLoading}
-                      className="btn-primary w-full text-sm"
-                    >
-                      {reqLoading ? (
-                        <><Loader2 className="h-4 w-4 animate-spin" />Sending...</>
-                      ) : (
-                        'Send Secure Access Link'
-                      )}
-                    </button>
-                  </form>
-
-                  <p className="mt-4 text-center text-xs text-slate-400">
-                    Not signed up yet?{' '}
-                    <button
-                      type="button"
-                      onClick={() => navigate('/')}
-                      className="text-brand-600 font-medium hover:text-brand-700 focus:outline-none"
-                    >
-                      Subscribe for alerts →
-                    </button>
-                  </p>
-                </div>
-              </motion.div>
-            )}
-
-            {/* ── Link sent ───────────────────────────── */}
-            {pageState === 'link-sent' && (
-              <motion.div
-                key="link-sent"
-                initial={{ opacity: 0, scale: 0.97 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.35 }}
-                className="card p-8 text-center"
-              >
-                <motion.div
-                  initial={{ scale: 0 }}
-                  animate={{ scale: 1 }}
-                  transition={{ type: 'spring', stiffness: 400, damping: 20, delay: 0.1 }}
-                  className="flex h-16 w-16 items-center justify-center rounded-full bg-success-100 mx-auto mb-4"
-                >
-                  <CheckCircle2 className="h-8 w-8 text-success-600" />
-                </motion.div>
-                <h2 className="text-lg font-semibold text-slate-900">Check your inbox</h2>
-                <p className="mt-2 text-sm text-slate-600 max-w-sm mx-auto">
-                  If an account exists for that email, a 15-minute access link has been sent to your inbox.
-                </p>
-                <p className="mt-4 text-xs text-slate-400">
-                  Check your spam folder if the email doesn't arrive within a few minutes.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPageState('request-link')
-                    setReqEmail('')
-                    setReqError('')
-                  }}
-                  className="mt-6 btn-secondary text-sm"
-                >
-                  Use a different email
-                </button>
-              </motion.div>
-            )}
-
-            {/* ── Error ───────────────────────────────── */}
-            {pageState === 'error' && (
-              <motion.div
-                key="error"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="card p-8 text-center"
-              >
-                <AlertCircle className="h-12 w-12 text-danger-400 mx-auto mb-4" />
-                <h2 className="text-lg font-semibold text-slate-900">Something went wrong</h2>
-                <p className="mt-2 text-sm text-slate-600">{loadError}</p>
-                <button
-                  type="button"
-                  onClick={() => { setPageState('loading'); setLoadError(''); window.location.reload() }}
-                  className="mt-6 btn-secondary text-sm"
-                >
-                  Try again
-                </button>
-              </motion.div>
-            )}
-
-            {/* ── Loaded: Edit preferences ─────────────── */}
-            {pageState === 'loaded' && preferences && (
-              <motion.div
-                key="loaded"
-                initial={{ opacity: 0, y: 16 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.4 }}
-              >
-                <div className="flex items-center gap-3 mb-6">
-                  <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-100">
-                    <Bell className="h-5 w-5 text-brand-600" />
-                  </span>
-                  <div>
-                    <h1 className="text-xl font-bold text-slate-900">Notification preferences</h1>
-                    <p className="text-sm text-slate-500">{preferences.email}</p>
+                    />
                   </div>
-                </div>
-
-                {/* User info card */}
-                <div className="card p-4 mb-5">
-                  <div className="flex flex-col sm:flex-row gap-3 sm:gap-6 text-sm">
-                    <span className="flex items-center gap-2 text-slate-600">
-                      <GraduationCap className="h-4 w-4 text-slate-400" />
-                      <span>Class of <strong className="text-slate-800">{preferences.graduation_year}</strong></span>
-                    </span>
-                    <span className="flex items-center gap-2 text-slate-600">
-                      <span className="h-4 w-4 text-slate-400 font-bold text-base">B</span>
-                      <span className="truncate" title={getBranchLabel(preferences.branch_canonical)}>
-                        {getBranchLabel(preferences.branch_canonical)}
-                      </span>
-                    </span>
-                  </div>
-                </div>
-
-                <form onSubmit={handleSave} className="card p-6 space-y-5">
-                  <div>
-                    <p className="text-sm font-semibold text-slate-900 mb-3">Alert preferences</p>
-                    <PreferenceCards values={prefs} onChange={prefChange} />
-                  </div>
-
-                  {/* Status messages */}
-                  <AnimatePresence>
-                    {saveState === 'saved' && (
-                      <motion.div
-                        initial={{ opacity: 0, y: -4 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0 }}
-                        className="alert-success text-sm"
-                        role="status"
-                      >
-                        <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
-                        {saveMsg}
-                      </motion.div>
-                    )}
-                    {saveState === 'error' && (
-                      <motion.div
-                        initial={{ opacity: 0, y: -4 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0 }}
-                        className="alert-error text-sm"
-                        role="alert"
-                      >
-                        <AlertCircle className="h-4 w-4 flex-shrink-0" />
-                        {saveMsg}
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
 
                   <button
                     type="submit"
-                    disabled={saveState === 'loading'}
-                    className="btn-primary w-full text-sm"
+                    disabled={reqLoading}
+                    className="btn-primary w-full py-3.5 text-xs tracking-widest justify-center"
                   >
-                    {saveState === 'loading' ? (
-                      <><Loader2 className="h-4 w-4 animate-spin" />Saving...</>
+                    {reqLoading ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        SENDING ACCESS LINK...
+                      </>
                     ) : (
-                      'Save Preferences'
+                      <>
+                        SEND 15-MINUTE ACCESS LINK
+                        <Mail className="h-4 w-4" />
+                      </>
                     )}
                   </button>
-                </form>
 
-                <p className="mt-4 text-center text-xs text-slate-400">
-                  To unsubscribe entirely, use the unsubscribe link in any alert email you receive.
+                  <div className="pt-2 text-center text-[11px] font-mono text-muted flex items-center justify-center gap-1.5">
+                    <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+                    <span>Passwordless 256-bit CSPRNG token security.</span>
+                  </div>
+                </form>
+              </div>
+            </motion.div>
+          )}
+
+          {/* ── 03: MAGIC LINK SENT CONFIRMATION ──────────────────────── */}
+          {pageState === 'link-sent' && (
+            <motion.div
+              key="link-sent"
+              initial={{ opacity: 0, scale: 0.97 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.35 }}
+              className="card bg-surface-1 border border-line-strong p-8 sm:p-12 text-center rounded-xl"
+            >
+              <div className="w-16 h-16 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center mx-auto mb-5 text-emerald-400">
+                <CheckCircle2 className="h-8 w-8" />
+              </div>
+              <h2 className="font-display text-3xl uppercase text-foreground tracking-wide">
+                ACCESS LINK DISPATCHED
+              </h2>
+              <p className="mt-3 text-sm text-muted font-light max-w-md mx-auto font-sans leading-relaxed">
+                If an active verified subscription exists for that address, a secure 15-minute access link has been dispatched to your inbox.
+              </p>
+              <div className="mt-6 p-4 bg-surface-2 rounded-lg border border-line text-xs font-mono text-muted text-left">
+                Open the link in your email to authenticate this browser session and update your opportunity alerts.
+              </div>
+              <button
+                type="button"
+                onClick={() => setPageState('request-link')}
+                className="mt-8 btn-secondary text-xs tracking-widest"
+              >
+                REQUEST FOR ANOTHER ADDRESS
+              </button>
+            </motion.div>
+          )}
+
+          {/* ── 04: AUTHENTICATED PREFERENCES EDITOR ──────────────────── */}
+          {pageState === 'loaded' && preferences && (
+            <motion.div
+              key="loaded"
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.35 }}
+            >
+              <div className="mb-8">
+                <span className="text-[11px] font-mono tracking-[0.25em] text-accent uppercase block mb-2 font-semibold">
+                  AUTHENTICATED SESSION
+                </span>
+                <h1 className="font-display text-4xl sm:text-5xl uppercase text-foreground leading-tight tracking-tight">
+                  SUBSCRIPTION SETTINGS
+                </h1>
+                <p className="mt-2 text-sm text-muted font-light font-sans">
+                  Manage which placement notifications are routed to your inbox.
                 </p>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
+              </div>
+
+              {/* Profile Details Card */}
+              <div className="card bg-surface-1 border border-line p-5 rounded-xl mb-6">
+                <div className="flex items-center justify-between border-b border-line pb-3 mb-3">
+                  <span className="text-[10px] font-mono tracking-widest text-muted uppercase">SUBSCRIBER IDENTITY</span>
+                  <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
+                    ● ACTIVE
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs font-mono">
+                  <div>
+                    <span className="text-muted block text-[10px] uppercase">EMAIL</span>
+                    <span className="text-foreground font-semibold truncate block mt-0.5 font-sans">
+                      {preferences.email}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-muted block text-[10px] uppercase">PROGRAMME</span>
+                    <span className="text-foreground font-semibold block mt-0.5">
+                      {getBranchLabel(preferences.branch_canonical)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Preferences Form */}
+              <form onSubmit={handleSave} className="space-y-6">
+                <div className="card bg-surface-1 border border-line-strong p-6 sm:p-8 rounded-xl shadow-[0_20px_50px_rgba(0,0,0,0.8)]">
+                  <div className="mb-4">
+                    <span className="text-xs font-mono uppercase tracking-wider text-muted block mb-1">
+                      OPPORTUNITY CHANNELS
+                    </span>
+                    <p className="text-xs text-muted font-light font-sans">
+                      Toggle the categories of recruitment opportunities you wish to receive.
+                    </p>
+                  </div>
+
+                  <PreferenceCards values={prefs} onChange={prefChange} />
+
+                  {saveMsg && (
+                    <div
+                      className={cn(
+                        'mt-5',
+                        saveState === 'saved' ? 'alert-success' : 'alert-error'
+                      )}
+                    >
+                      {saveState === 'saved' ? (
+                        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                      ) : (
+                        <AlertCircle className="h-4 w-4 shrink-0 text-danger-500" />
+                      )}
+                      <span>{saveMsg}</span>
+                    </div>
+                  )}
+
+                  <div className="mt-8 flex flex-col sm:flex-row items-center gap-4">
+                    <button
+                      type="submit"
+                      disabled={saveState === 'loading'}
+                      className="btn-primary w-full sm:w-auto text-xs tracking-widest justify-center py-3.5 px-6"
+                    >
+                      {saveState === 'loading' ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          SAVING PREFERENCES...
+                        </>
+                      ) : (
+                        'SAVE PREFERENCES'
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => navigate('/')}
+                      className="btn-secondary w-full sm:w-auto text-xs tracking-widest justify-center py-3.5 px-5"
+                    >
+                      CANCEL
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </motion.div>
+          )}
+
+          {/* ── 05: LOAD ERROR ────────────────────────────────────────── */}
+          {pageState === 'error' && (
+            <motion.div
+              key="error"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="card bg-surface-1 border border-line p-8 text-center rounded-xl"
+            >
+              <AlertCircle className="h-10 w-10 text-danger-500 mx-auto mb-4" />
+              <h2 className="font-display text-2xl uppercase text-foreground">SESSION ERROR</h2>
+              <p className="mt-2 text-sm text-muted">{loadError}</p>
+              <button
+                type="button"
+                onClick={() => setPageState('request-link')}
+                className="mt-6 btn-secondary text-xs tracking-widest"
+              >
+                REQUEST NEW ACCESS LINK
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
+
+      <Footer navigate={navigate} />
     </div>
   )
 }

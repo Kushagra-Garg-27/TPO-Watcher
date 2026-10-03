@@ -1,48 +1,89 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Menu, X, Bell } from 'lucide-react'
-import { cn } from '../lib/utils'
+import { Menu, X, ArrowUpRight } from 'lucide-react'
 
 interface NavbarProps {
   navigate: (path: string) => void
 }
 
-const navLinks = [
-  { label: 'About', href: '#about' },
-  { label: 'How it works', href: '#how-it-works' },
-  { label: 'Preferences', href: '/preferences', external: false },
+interface NavItem {
+  label: string
+  href: string
+  isPage?: boolean
+}
+
+const NAV_ITEMS: NavItem[] = [
+  { label: 'OVERVIEW', href: '#overview' },
+  { label: 'HOW IT WORKS', href: '#how-it-works' },
+  { label: 'LIVE DETECTIONS', href: '#detections' },
+  { label: 'CAPABILITIES', href: '#capabilities' },
+  { label: 'TECH STORY', href: '#technology' },
+  { label: 'PREFERENCES', href: '/preferences', isPage: true },
 ]
 
 export function Navbar({ navigate }: NavbarProps) {
   const [scrolled, setScrolled] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 16)
+    const onScroll = () => setScrolled(window.scrollY > 24)
     window.addEventListener('scroll', onScroll, { passive: true })
     return () => window.removeEventListener('scroll', onScroll)
   }, [])
 
+  // Lock body scroll when mobile menu is open
+  useEffect(() => {
+    if (menuOpen) {
+      document.body.style.overflow = 'hidden'
+    } else {
+      document.body.style.overflow = ''
+    }
+    return () => {
+      document.body.style.overflow = ''
+    }
+  }, [menuOpen])
+
+  // Close mobile menu on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && menuOpen) {
+        setMenuOpen(false)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [menuOpen])
+
   // Close menu on resize to desktop
   useEffect(() => {
-    const onResize = () => { if (window.innerWidth >= 768) setMenuOpen(false) }
+    const onResize = () => {
+      if (window.innerWidth >= 1024) setMenuOpen(false)
+    }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
-  function handleNavClick(e: React.MouseEvent, link: typeof navLinks[number]) {
-    e.preventDefault()
+  function handleNav(item: NavItem) {
     setMenuOpen(false)
-    if (link.href.startsWith('#')) {
-      const el = document.querySelector(link.href)
-      el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    if (item.isPage) {
+      navigate(item.href)
     } else {
-      navigate(link.href)
+      if (window.location.pathname !== '/' && window.location.pathname !== '/signup') {
+        navigate('/')
+        setTimeout(() => {
+          document.querySelector(item.href)?.scrollIntoView({ behavior: 'smooth' })
+        }, 120)
+      } else {
+        const el = document.querySelector(item.href)
+        el?.scrollIntoView({ behavior: 'smooth' })
+      }
     }
   }
 
   function handleLogoClick(e: React.MouseEvent) {
     e.preventDefault()
+    setMenuOpen(false)
     navigate('/')
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
@@ -50,122 +91,157 @@ export function Navbar({ navigate }: NavbarProps) {
   return (
     <>
       <header
-        className={cn(
-          'fixed top-0 inset-x-0 z-40 transition-all duration-300',
+        className={`fixed top-0 inset-x-0 z-40 transition-all duration-300 ${
           scrolled
-            ? 'navbar-backdrop bg-white/90 border-b border-slate-100 shadow-sm'
-            : 'bg-transparent'
-        )}
+            ? 'nav-backdrop border-b border-line py-3 shadow-[0_4px_30px_rgba(0,0,0,0.8)]'
+            : 'bg-transparent py-5'
+        }`}
       >
-        <div className="section-container flex h-14 items-center justify-between">
-          {/* Logo */}
+        <div className="section-container flex items-center justify-between">
+          {/* Logo / System Signature */}
           <a
             href="/"
             onClick={handleLogoClick}
-            className="flex items-center gap-2.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 rounded-lg"
+            className="flex items-center gap-3 group focus:outline-none focus-visible:ring-1 focus-visible:ring-accent rounded-sm"
           >
-            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600 shadow-brand text-white">
-              <Bell className="h-4 w-4" strokeWidth={2.5} />
+            <span className="flex items-center justify-center w-7 h-7 bg-surface-2 border border-line-strong rounded text-accent font-display text-sm group-hover:border-accent transition-colors">
+              ✦
             </span>
-            <span className="text-sm font-semibold text-slate-900 leading-tight">
-              TPO Watcher
-              <span className="block text-[10px] font-medium text-slate-500 leading-none">
-                VIT Pune
+            <div className="flex flex-col">
+              <span className="font-display text-lg tracking-wider text-foreground leading-none">
+                TPO WATCHER
               </span>
-            </span>
+              <span className="text-[10px] tracking-[0.2em] font-mono text-muted uppercase">
+                VIT PUNE · 2028
+              </span>
+            </div>
           </a>
 
-          {/* Desktop nav */}
-          <nav className="hidden md:flex items-center gap-1" aria-label="Main navigation">
-            {navLinks.map(link => (
-              <a
-                key={link.label}
-                href={link.href}
-                onClick={e => handleNavClick(e, link)}
-                className="btn-ghost text-sm"
+          {/* Center: Desktop Nav Links */}
+          <nav
+            className="hidden lg:flex items-center gap-8"
+            aria-label="Primary navigation"
+          >
+            {NAV_ITEMS.map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                onClick={() => handleNav(item)}
+                className="relative text-[11px] font-mono tracking-[0.18em] uppercase text-muted hover:text-foreground transition-colors duration-200 group py-1"
               >
-                {link.label}
-              </a>
+                {item.label}
+                <span className="absolute bottom-0 left-0 w-0 h-[1.5px] bg-accent group-hover:w-full transition-all duration-200" />
+              </button>
             ))}
           </nav>
 
-          {/* Desktop CTA */}
-          <div className="hidden md:flex items-center gap-3">
-            <a
-              href="/#signup"
-              onClick={e => {
-                e.preventDefault()
-                navigate('/')
-                setTimeout(() => {
+          {/* Right: Live Status & CTA */}
+          <div className="hidden lg:flex items-center gap-5">
+
+            {/* Subscribe Action */}
+            <button
+              type="button"
+              onClick={() => {
+                if (window.location.pathname !== '/' && window.location.pathname !== '/signup') {
+                  navigate('/')
+                  setTimeout(() => {
+                    document.querySelector('#signup')?.scrollIntoView({ behavior: 'smooth' })
+                  }, 120)
+                } else {
                   document.querySelector('#signup')?.scrollIntoView({ behavior: 'smooth' })
-                }, 100)
+                }
               }}
-              className="btn-primary text-sm px-4 py-2"
+              className="btn-primary text-xs py-2 px-4 tracking-widest"
             >
-              Get Alerts
-            </a>
+              SUBSCRIBE
+              <ArrowUpRight className="h-3.5 w-3.5" />
+            </button>
           </div>
 
-          {/* Mobile menu button */}
-          <button
-            type="button"
-            className="md:hidden btn-ghost p-2"
-            aria-label={menuOpen ? 'Close menu' : 'Open menu'}
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen(prev => !prev)}
-          >
-            <AnimatePresence mode="wait" initial={false}>
-              {menuOpen
-                ? <motion.span key="x" initial={{ rotate: -90, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} exit={{ rotate: 90, opacity: 0 }} transition={{ duration: 0.15 }}>
-                    <X className="h-5 w-5" />
-                  </motion.span>
-                : <motion.span key="menu" initial={{ rotate: 90, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} exit={{ rotate: -90, opacity: 0 }} transition={{ duration: 0.15 }}>
-                    <Menu className="h-5 w-5" />
-                  </motion.span>
-              }
-            </AnimatePresence>
-          </button>
+          {/* Mobile Menu Toggle */}
+          <div className="flex items-center gap-3 lg:hidden">
+
+            <button
+              type="button"
+              className="p-2 text-foreground hover:text-accent transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-accent rounded"
+              aria-label={menuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen((prev) => !prev)}
+            >
+              {menuOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
+            </button>
+          </div>
         </div>
       </header>
 
-      {/* Mobile menu drawer */}
+      {/* Full-Screen Dark Cinematic Mobile Menu */}
       <AnimatePresence>
         {menuOpen && (
           <motion.div
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-            className="fixed inset-x-0 top-14 z-30 navbar-backdrop bg-white/95 border-b border-slate-100 shadow-md md:hidden"
+            ref={menuRef}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.25 }}
+            className="fixed inset-0 z-30 bg-[#08080a] flex flex-col justify-between p-6 pt-24 pb-8 lg:hidden"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Mobile navigation menu"
           >
-            <nav className="section-container py-4 flex flex-col gap-1" aria-label="Mobile navigation">
-              {navLinks.map(link => (
-                <a
-                  key={link.label}
-                  href={link.href}
-                  onClick={e => handleNavClick(e, link)}
-                  className="flex items-center px-3 py-3 text-sm font-medium text-slate-700 hover:text-brand-600 hover:bg-brand-50 rounded-xl transition-colors"
+            {/* Background grid motif */}
+            <div className="absolute inset-0 bg-dark-grid opacity-30 pointer-events-none" />
+
+            {/* Nav Items */}
+            <nav className="relative flex flex-col gap-5 my-auto" aria-label="Mobile links">
+              {NAV_ITEMS.map((item, index) => (
+                <motion.button
+                  key={item.label}
+                  type="button"
+                  onClick={() => handleNav(item)}
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -10 }}
+                  transition={{
+                    duration: 0.35,
+                    delay: index * 0.05,
+                    ease: [0.16, 1, 0.3, 1],
+                  }}
+                  className="group flex items-center justify-between text-left py-2 border-b border-line"
                 >
-                  {link.label}
-                </a>
+                  <span className="font-display text-3xl sm:text-4xl text-foreground uppercase tracking-wider group-hover:text-accent group-hover:translate-x-2 transition-all duration-200">
+                    {item.label}
+                  </span>
+                  <ArrowUpRight className="h-5 w-5 text-muted group-hover:text-accent transition-colors" />
+                </motion.button>
               ))}
-              <div className="pt-2 border-t border-slate-100 mt-1">
-                <a
-                  href="/#signup"
-                  onClick={e => {
-                    e.preventDefault()
-                    setMenuOpen(false)
+            </nav>
+
+            {/* Bottom Actions */}
+            <div className="relative pt-6 border-t border-line flex flex-col gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false)
+                  if (window.location.pathname !== '/' && window.location.pathname !== '/signup') {
                     navigate('/')
                     setTimeout(() => {
                       document.querySelector('#signup')?.scrollIntoView({ behavior: 'smooth' })
-                    }, 100)
-                  }}
-                  className="btn-primary w-full mt-2 text-sm"
-                >
-                  Get Alerts
-                </a>
+                    }, 120)
+                  } else {
+                    document.querySelector('#signup')?.scrollIntoView({ behavior: 'smooth' })
+                  }
+                }}
+                className="btn-primary w-full py-3.5 text-sm tracking-widest justify-center"
+              >
+                SUBSCRIBE FOR ALERTS
+                <ArrowUpRight className="h-4 w-4" />
+              </button>
+
+              <div className="flex items-center justify-between text-[11px] font-mono text-muted pt-2">
+                <span>VIT PUNE CLASS OF 2028</span>
+                <span className="text-accent">● AUTONOMOUS ENGINE</span>
               </div>
-            </nav>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

@@ -44,7 +44,7 @@ export default function App() {
   const showNavbar = route.page === 'home' || route.page === 'preferences'
 
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen bg-background text-foreground selection:bg-accent selection:text-white">
       <a href="#main-content" className="skip-link">Skip to main content</a>
 
       {showNavbar && <Navbar navigate={navigate} />}

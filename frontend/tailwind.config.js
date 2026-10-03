@@ -7,41 +7,62 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', 'Helvetica', 'Arial', 'sans-serif'],
+        display: ['Anton', 'sans-serif'],
+        sans: ['Onest', '-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', 'sans-serif'],
+        mono: ['"JetBrains Mono"', 'monospace'],
       },
       colors: {
-        // VIT TPO Watcher design system
+        // Marcus Vane cinematic foundation tokens
+        background: '#08080a',
+        foreground: '#f3f1ea',
+        surface: {
+          DEFAULT: '#111114',
+          1: '#111114',
+          2: '#17171b',
+          3: '#202026',
+        },
+        muted: '#807f78',
+        line: {
+          DEFAULT: 'rgba(243,241,234,0.10)',
+          strong: 'rgba(243,241,234,0.22)',
+        },
+        accent: {
+          DEFAULT: '#ff3b1d',
+          2: '#ff6a3d',
+          muted: 'rgba(255, 59, 29, 0.15)',
+        },
+        // Restrained semantic status tokens
         brand: {
-          50:  '#eef2ff',
-          100: '#e0e7ff',
-          200: '#c7d2fe',
-          300: '#a5b4fc',
-          400: '#818cf8',
-          500: '#6366f1',   // indigo-500 - primary actions
-          600: '#4f46e5',   // indigo-600 - primary buttons
-          700: '#4338ca',   // indigo-700 - hover
-          800: '#3730a3',   // indigo-800 - deep
-          900: '#312e81',   // indigo-900 - hero text
-          950: '#1e1b4b',
+          50:  '#fff5f2',
+          100: '#ffe6e0',
+          200: '#ffccc2',
+          300: '#ffa394',
+          400: '#ff6a3d',
+          500: '#ff3b1d',
+          600: '#e52c0f',
+          700: '#c22108',
+          800: '#9e1e0a',
+          900: '#7f1d0d',
+          950: '#450b04',
         },
         success: {
-          50:  '#ecfdf5',
-          100: '#d1fae5',
-          500: '#10b981',
-          600: '#059669',
-          700: '#047857',
+          50:  '#0d2818',
+          100: '#164426',
+          500: '#22c55e',
+          600: '#16a34a',
+          700: '#15803d',
         },
         warning: {
-          50:  '#fffbeb',
-          100: '#fef3c7',
+          50:  '#2a1f07',
+          100: '#48350d',
           500: '#f59e0b',
           600: '#d97706',
           700: '#b45309',
         },
         danger: {
-          50:  '#fef2f2',
-          100: '#fee2e2',
-          200: '#fecaca',
+          50:  '#2d1010',
+          100: '#4a1717',
+          200: '#731f1f',
           500: '#ef4444',
           600: '#dc2626',
           700: '#b91c1c',
@@ -60,35 +81,36 @@ export default {
           from: { opacity: '0', transform: 'translateY(-8px)' },
           to:   { opacity: '1', transform: 'translateY(0)' },
         },
-        shimmer: {
-          '0%, 100%': { backgroundPosition: '0% 50%' },
-          '50%':       { backgroundPosition: '100% 50%' },
+        marquee: {
+          '0%': { transform: 'translateX(0%)' },
+          '100%': { transform: 'translateX(-50%)' },
         },
-        'pulse-slow': {
-          '0%, 100%': { opacity: '1' },
-          '50%':       { opacity: '0.5' },
+        'pulse-beacon': {
+          '0%, 100%': { opacity: '1', transform: 'scale(1)' },
+          '50%': { opacity: '0.4', transform: 'scale(1.15)' },
         },
       },
       animation: {
-        'fade-up':     'fade-up 0.5s cubic-bezier(0.22,1,0.36,1) both',
+        'fade-up':     'fade-up 0.5s cubic-bezier(0.16,1,0.3,1) both',
         'fade-in':     'fade-in 0.4s ease both',
         'slide-down':  'slide-down 0.2s ease both',
-        'pulse-slow':  'pulse-slow 3s ease-in-out infinite',
+        'marquee':     'marquee 22s linear infinite',
+        'pulse-beacon':'pulse-beacon 2s cubic-bezier(0.4,0,0.6,1) infinite',
       },
       boxShadow: {
-        'card':   '0 1px 3px rgba(15,23,42,0.06), 0 4px 16px rgba(15,23,42,0.04)',
-        'card-md':'0 2px 8px rgba(15,23,42,0.08), 0 16px 32px rgba(15,23,42,0.06)',
-        'focus':  '0 0 0 3px rgba(99,102,241,0.25)',
-        'brand':  '0 4px 14px rgba(79,70,229,0.25)',
+        'card':   '0 1px 2px rgba(0,0,0,0.4), 0 4px 16px rgba(0,0,0,0.6)',
+        'card-md':'0 4px 12px rgba(0,0,0,0.6), 0 20px 40px rgba(0,0,0,0.8)',
+        'glow-accent': '0 0 24px rgba(255,59,29,0.25)',
+        'focus':  '0 0 0 2px rgba(255,59,29,0.6)',
       },
       borderRadius: {
-        'xl':  '0.75rem',
-        '2xl': '1rem',
-        '3xl': '1.5rem',
+        'sm':  '0.25rem',
+        'md':  '0.5rem',
+        'lg':  '0.75rem',
+        'xl':  '1rem',
+        '2xl': '1.25rem',
       },
     },
   },
-  plugins: [
-    // @tailwindcss/forms is loaded separately if available
-  ],
+  plugins: [],
 }

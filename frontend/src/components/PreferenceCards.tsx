@@ -1,32 +1,36 @@
 import { motion } from 'framer-motion'
-import { Briefcase, Award, Building2 } from 'lucide-react'
+import { Briefcase, Award, Building2, Check } from 'lucide-react'
 import { cn } from '../lib/utils'
 
 interface Preference {
   id: 'pref_internship' | 'pref_placement' | 'pref_ppo'
-  icon: React.ReactNode
+  icon: typeof Briefcase
   title: string
   description: string
+  badge: string
 }
 
 const PREFERENCES: Preference[] = [
   {
     id: 'pref_internship',
-    icon: <Briefcase className="h-5 w-5" />,
-    title: 'Internships',
-    description: 'Get alerts for internship opportunities.',
+    icon: Briefcase,
+    title: 'INTERNSHIPS',
+    description: 'Autonomous alerts for short-term summer or winter engineering internships.',
+    badge: 'SUMMER / WINTER',
   },
   {
     id: 'pref_ppo',
-    icon: <Award className="h-5 w-5" />,
-    title: 'Internship + PPO',
-    description: 'Alerts when an internship includes a performance-based PPO.',
+    icon: Award,
+    title: 'INTERNSHIP + PPO',
+    description: 'Opportunities featuring performance-linked Pre-Placement Offers for full-time conversion.',
+    badge: 'HIGH CONVERSION',
   },
   {
     id: 'pref_placement',
-    icon: <Building2 className="h-5 w-5" />,
-    title: 'Full-time Placements',
-    description: 'Get alerts for full-time placement opportunities.',
+    icon: Building2,
+    title: 'FULL-TIME PLACEMENTS',
+    description: 'Direct graduate recruitment drives for permanent campus placements.',
+    badge: 'FULL-TIME ROLES',
   },
 ]
 
@@ -46,8 +50,9 @@ export function PreferenceCards({ values, onChange }: PreferenceCardsProps) {
       role="group"
       aria-label="Opportunity alert preferences"
     >
-      {PREFERENCES.map(pref => {
+      {PREFERENCES.map((pref) => {
         const isSelected = values[pref.id]
+        const Icon = pref.icon
         return (
           <motion.label
             key={pref.id}
@@ -55,63 +60,63 @@ export function PreferenceCards({ values, onChange }: PreferenceCardsProps) {
             whileTap={{ scale: 0.985 }}
             transition={{ duration: 0.12 }}
             className={cn(
-              'pref-card',
-              isSelected && 'selected',
+              'pref-card border rounded-lg p-4 flex items-center justify-between gap-4 cursor-pointer transition-all duration-200 select-none',
+              isSelected
+                ? 'bg-surface-2 border-accent shadow-[0_0_16px_rgba(255,59,29,0.12)]'
+                : 'bg-surface-1 border-line hover:border-line-strong'
             )}
           >
-            {/* Hidden native checkbox for a11y */}
+            {/* Hidden native checkbox for accessibility */}
             <input
               type="checkbox"
               id={`pref-${pref.id}`}
               checked={isSelected}
-              onChange={e => onChange(pref.id, e.target.checked)}
+              onChange={(e) => onChange(pref.id, e.target.checked)}
               className="sr-only"
             />
 
-            {/* Icon */}
-            <motion.div
-              animate={{
-                backgroundColor: isSelected ? 'rgb(238,242,255)' : 'rgb(248,250,252)',
-                color: isSelected ? 'rgb(79,70,229)' : 'rgb(100,116,139)',
-              }}
-              transition={{ duration: 0.15 }}
-              className="flex-shrink-0 flex h-9 w-9 items-center justify-center rounded-lg mt-0.5"
-            >
-              {pref.icon}
-            </motion.div>
+            <div className="flex items-start gap-3.5">
+              <div
+                className={cn(
+                  'w-9 h-9 rounded flex items-center justify-center shrink-0 border transition-colors',
+                  isSelected
+                    ? 'bg-accent/15 border-accent/30 text-accent'
+                    : 'bg-surface-2 border-line text-muted'
+                )}
+              >
+                <Icon className="h-4 w-4" />
+              </div>
 
-            {/* Text */}
-            <div className="flex-1 min-w-0">
-              <p className={cn(
-                'text-sm font-semibold transition-colors duration-150',
-                isSelected ? 'text-brand-700' : 'text-slate-800'
-              )}>
-                {pref.title}
-              </p>
-              <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
-                {pref.description}
-              </p>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      'font-display text-base uppercase tracking-wider',
+                      isSelected ? 'text-foreground' : 'text-muted'
+                    )}
+                  >
+                    {pref.title}
+                  </span>
+                  <span className="text-[11px] font-mono tracking-wider text-muted/60 uppercase">
+                    [{pref.badge}]
+                  </span>
+                </div>
+                <p className="text-xs text-muted font-light mt-0.5 leading-relaxed font-sans">
+                  {pref.description}
+                </p>
+              </div>
             </div>
 
-            {/* Checkmark */}
-            <div className={cn(
-              'flex-shrink-0 flex h-5 w-5 items-center justify-center rounded mt-0.5',
-              'border-2 transition-all duration-150',
-              isSelected
-                ? 'bg-brand-600 border-brand-600'
-                : 'bg-white border-slate-300'
-            )}>
-              {isSelected && (
-                <motion.svg
-                  initial={{ scale: 0, opacity: 0 }}
-                  animate={{ scale: 1, opacity: 1 }}
-                  transition={{ type: 'spring', stiffness: 500, damping: 25 }}
-                  className="h-3 w-3 text-white"
-                  fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                </motion.svg>
+            {/* Custom Check Indicator */}
+            <div
+              className={cn(
+                'w-5 h-5 rounded border flex items-center justify-center shrink-0 transition-all',
+                isSelected
+                  ? 'bg-accent border-accent text-white'
+                  : 'bg-surface-2 border-line text-transparent'
               )}
+            >
+              <Check className="h-3 w-3 stroke-[3]" />
             </div>
           </motion.label>
         )

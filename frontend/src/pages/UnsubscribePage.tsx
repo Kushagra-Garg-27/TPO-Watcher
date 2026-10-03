@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { motion } from 'framer-motion'
-import { CheckCircle2, AlertCircle, Loader2, Bell } from 'lucide-react'
+import { CheckCircle2, AlertCircle, Loader2, BellOff, ArrowRight } from 'lucide-react'
 
 interface UnsubscribePageProps {
   token: string
@@ -14,7 +14,10 @@ export function UnsubscribePage({ token, navigate }: UnsubscribePageProps) {
     const isDirectApi = window.location.pathname.startsWith('/api/v1/unsubscribe')
     const params = new URLSearchParams(window.location.search)
     if (params.get('status') === 'error') {
-      return { state: 'error' as UnsubscribeState, message: params.get('message') || 'Invalid or expired unsubscribe link.' }
+      return {
+        state: 'error' as UnsubscribeState,
+        message: params.get('message') || 'Invalid or expired unsubscribe link.',
+      }
     }
     if (isDirectApi || params.get('status') === 'success') {
       return { state: 'success' as UnsubscribeState, message: '' }
@@ -44,47 +47,53 @@ export function UnsubscribePage({ token, navigate }: UnsubscribePageProps) {
       } else {
         const body = await res.json().catch(() => ({}))
         setState('error')
-        setMessage(body.detail || 'Unsubscribe failed. The link may have expired.')
+        setMessage(body.detail || 'Unsubscribe request failed. The token may have expired.')
       }
     } catch {
       setState('error')
-      setMessage('Network error. Please try again.')
+      setMessage('Network error. Please check your connection and try again.')
     }
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4">
-      <div className="max-w-md w-full">
+    <div className="min-h-screen bg-background text-foreground flex items-center justify-center px-4 relative overflow-hidden">
+      <div className="absolute inset-0 bg-dark-grid opacity-30 pointer-events-none" />
+
+      <div className="max-w-md w-full relative z-10">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4 }}
-          className="card p-8 text-center"
+          className="card bg-surface-1 border border-line-strong p-8 sm:p-10 text-center rounded-xl shadow-[0_20px_50px_rgba(0,0,0,0.85)]"
         >
           {state === 'confirming' && (
             <>
-              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-warning-50 border border-warning-100 mx-auto mb-4">
-                <Bell className="h-6 w-6 text-warning-500" />
+              <div className="w-16 h-16 rounded-full bg-warning-500/10 border border-warning-500/30 flex items-center justify-center mx-auto mb-5 text-warning-500">
+                <BellOff className="h-7 w-7" />
               </div>
-              <h1 className="text-lg font-semibold text-slate-900">Unsubscribe from TPO alerts?</h1>
-              <p className="mt-2 text-sm text-slate-600">
-                You'll stop receiving email notifications for matching TPO opportunities.
-                You can re-subscribe at any time.
+              <span className="text-[10px] font-mono tracking-[0.2em] text-warning-500 uppercase block mb-1">
+                CONFIRMATION REQUIRED
+              </span>
+              <h1 className="font-display text-2xl uppercase text-foreground tracking-wide">
+                CANCEL TPO ALERTS?
+              </h1>
+              <p className="mt-3 text-sm text-muted font-light max-w-sm mx-auto font-sans leading-relaxed">
+                You will stop receiving automated email alerts for newly detected VIT Pune placement and internship opportunities.
               </p>
-              <div className="mt-6 flex flex-col gap-2">
+              <div className="mt-8 flex flex-col gap-3">
                 <button
                   type="button"
                   onClick={handleConfirm}
-                  className="btn-destructive w-full text-sm"
+                  className="btn-destructive w-full text-xs tracking-widest justify-center py-3.5"
                 >
-                  Yes, unsubscribe me
+                  YES, UNSUBSCRIBE ME
                 </button>
                 <button
                   type="button"
                   onClick={() => navigate('/')}
-                  className="btn-secondary w-full text-sm"
+                  className="btn-secondary w-full text-xs tracking-widest justify-center py-3.5"
                 >
-                  No, keep my alerts
+                  KEEP MY SUBSCRIPTION ACTIVE
                 </button>
               </div>
             </>
@@ -92,8 +101,10 @@ export function UnsubscribePage({ token, navigate }: UnsubscribePageProps) {
 
           {state === 'loading' && (
             <>
-              <Loader2 className="h-10 w-10 text-brand-500 animate-spin mx-auto mb-4" />
-              <h1 className="text-base font-medium text-slate-700">Processing...</h1>
+              <Loader2 className="h-10 w-10 text-accent animate-spin mx-auto mb-4" />
+              <h2 className="font-display text-xl uppercase tracking-wide text-foreground">
+                PROCESSING REQUEST...
+              </h2>
             </>
           )}
 
@@ -103,39 +114,47 @@ export function UnsubscribePage({ token, navigate }: UnsubscribePageProps) {
                 initial={{ scale: 0 }}
                 animate={{ scale: 1 }}
                 transition={{ type: 'spring', stiffness: 400, damping: 20 }}
-                className="flex h-16 w-16 items-center justify-center rounded-full bg-slate-100 mx-auto mb-4"
+                className="w-16 h-16 rounded-full bg-surface-2 border border-line flex items-center justify-center mx-auto mb-5 text-muted"
               >
-                <CheckCircle2 className="h-8 w-8 text-slate-500" />
+                <CheckCircle2 className="h-8 w-8" />
               </motion.div>
-              <h1 className="text-lg font-semibold text-slate-900">Unsubscribed</h1>
-              <p className="mt-2 text-sm text-slate-600">
-                You've been unsubscribed from TPO opportunity alerts.
-                You won't receive further notifications.
-              </p>
-              <p className="mt-4 text-xs text-slate-400">
-                Changed your mind? You can sign up again on the home page.
+              <span className="text-[10px] font-mono tracking-[0.2em] text-muted uppercase block mb-1">
+                SUBSCRIPTION CANCELLED
+              </span>
+              <h1 className="font-display text-3xl uppercase text-foreground tracking-wide">
+                UNSUBSCRIBED
+              </h1>
+              <p className="mt-3 text-sm text-muted font-light max-w-sm mx-auto font-sans leading-relaxed">
+                Your email has been removed from the notification delivery pipeline. Any pending alerts have been revoked.
               </p>
               <button
                 type="button"
                 onClick={() => navigate('/')}
-                className="mt-6 btn-secondary w-full text-sm"
+                className="mt-8 btn-secondary w-full text-xs tracking-widest justify-center py-3.5"
               >
-                Back to home
+                RETURN TO HOME
+                <ArrowRight className="h-3.5 w-3.5" />
               </button>
             </>
           )}
 
           {state === 'error' && (
             <>
-              <AlertCircle className="h-12 w-12 text-danger-400 mx-auto mb-4" />
-              <h1 className="text-lg font-semibold text-slate-900">Unsubscribe failed</h1>
-              <p className="mt-2 text-sm text-slate-600">{message}</p>
+              <div className="w-16 h-16 rounded-full bg-danger-500/10 border border-danger-500/30 flex items-center justify-center mx-auto mb-5 text-danger-500">
+                <AlertCircle className="h-8 w-8" />
+              </div>
+              <h1 className="font-display text-2xl uppercase text-foreground tracking-wide">
+                UNSUBSCRIBE FAILED
+              </h1>
+              <p className="mt-3 text-sm text-muted font-light max-w-sm mx-auto font-sans">
+                {message}
+              </p>
               <button
                 type="button"
                 onClick={() => navigate('/')}
-                className="mt-6 btn-secondary w-full text-sm"
+                className="mt-8 btn-secondary w-full text-xs tracking-widest justify-center py-3.5"
               >
-                Back to home
+                RETURN TO HOME
               </button>
             </>
           )}
