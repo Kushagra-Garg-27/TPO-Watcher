@@ -34,13 +34,12 @@ def health_check() -> Dict[str, Any]:
 
         db_ok = True
     except Exception as e:
-        logger.error(f"Health check failed database query: {e}")
+        logger.exception("Health check failed database query: %s", e)
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={
                 "status": "unhealthy",
-                "database": "unreachable",
-                "error": str(e)
+                "database": "unreachable"
             }
         )
 

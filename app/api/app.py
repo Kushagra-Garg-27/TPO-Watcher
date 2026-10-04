@@ -6,7 +6,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp
 from app.config import settings
-from app.api.middleware import SecurityHeadersMiddleware
+from app.api.middleware import (
+    SecurityHeadersMiddleware,
+    RequestBodyLimitMiddleware,
+    RequestBodyTooLargeException,
+)
 from app.api.routes_auth import router as auth_router
 from app.api.routes_preferences import router as pref_router
 from app.api.routes_opportunities import router as opps_router
@@ -22,12 +26,14 @@ INDEX_HTML = STATIC_DIR / "index.html"
 
 class SecureFastAPI(FastAPI):
     """
-    Custom FastAPI subclass ensuring pure ASGI security headers middleware wraps
-    the outermost ASGI boundary, including Starlette's ServerErrorMiddleware.
+    Custom FastAPI subclass ensuring pure ASGI security headers and request body
+    limiting middlewares wrap the outermost ASGI boundary, including Starlette's ServerErrorMiddleware.
     """
     def build_middleware_stack(self) -> ASGIApp:
         stack = super().build_middleware_stack()
-        return SecurityHeadersMiddleware(stack)
+        stack = RequestBodyLimitMiddleware(stack, max_body_bytes=settings.MAX_REQUEST_BODY_BYTES)
+        stack = SecurityHeadersMiddleware(stack)
+        return stack
 
 
 def create_app() -> FastAPI:
@@ -42,6 +48,13 @@ def create_app() -> FastAPI:
         openapi_url=openapi_url,
         redoc_url=None
     )
+
+    @app.exception_handler(RequestBodyTooLargeException)
+    async def request_body_too_large_handler(request: Request, exc: RequestBodyTooLargeException):
+        return JSONResponse(
+            status_code=413,
+            content={"detail": "Request body too large"}
+        )
 
     # Note on CORS: Per Requirement 15, broad CORS is explicitly omitted.
     # The application serves same-origin forms and secure APIs.

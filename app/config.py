@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     COOKIE_SECURE: bool = True
     ENABLE_DOCS: bool = False
     HSTS_MAX_AGE: int = 86400
+    MAX_REQUEST_BODY_BYTES: int = 65536
 
     # Rate Limiting Configuration (Per minute or per window)
     RATE_LIMIT_SIGNUP_PER_IP: int = 30
