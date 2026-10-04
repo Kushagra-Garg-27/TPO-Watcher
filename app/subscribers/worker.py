@@ -10,6 +10,7 @@ from app.config import settings
 from app.database.interfaces import DeliveryRepositoryProtocol, TokenRepositoryProtocol
 from app.tpo.models import CompanyRecord
 from app.notifications.email import EmailNotificationProvider
+from app.notifications.utils import escape_html, sanitize_url, render_safe_link
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,27 @@ class DeliveryWorker:
         header_color = "#d32f2f" if notif_type == "NEW" else "#f57c00"
         title = "🚨 NEW VIT TPO OPPORTUNITY" if notif_type == "NEW" else "⚠️ VIT TPO OPPORTUNITY UPDATED"
 
+        company_name = escape_html(company_record.company)
+        company_code = escape_html(company_record.company_code or "N/A")
+        placement_type = escape_html(company_record.placementtype or "N/A")
+        internship_type = escape_html(company_record.internshiptype or "N/A")
+        max_pkg = escape_html(company_record.maxPackage or "N/A")
+        min_pkg = escape_html(company_record.minPackage or "N/A")
+        reg_start = escape_html(f"{company_record.regStartdate or 'N/A'} {company_record.regStarttime or ''}".strip())
+        reg_end = escape_html(f"{company_record.regEnddate or 'N/A'} {company_record.regEndtime or ''}".strip())
+        academic_year = escape_html(company_record.academicyear or "N/A")
+        user_branch_esc = escape_html(user_branch)
+        programs_esc = escape_html(programs)
+        now_ist_esc = escape_html(now_ist)
+
+        safe_pref_url = sanitize_url(pref_url) or "#"
+        safe_unsub_url = sanitize_url(unsub_url) or "#"
+        portal_button = render_safe_link(
+            "https://tpo.vierp.in/company-dashboard",
+            "Open Official TPO Portal",
+            style="background-color: #0366d6; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 6px; font-weight: bold; font-size: 15px; display: inline-block;"
+        )
+
         html = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"/></head>
@@ -68,62 +90,59 @@ class DeliveryWorker:
             <p style="margin: 4px 0 0 0; font-size: 13px; opacity: 0.9;">Exclusive Alert for VIT Pune Class of 2028</p>
         </div>
         <div style="padding: 24px;">
-            <p style="font-size: 16px; margin-top: 0;"><strong>Company:</strong> <span style="font-size: 18px; color: #111;">{company_record.company}</span> ({company_record.company_code or 'N/A'})</p>
+            <p style="font-size: 16px; margin-top: 0;"><strong>Company:</strong> <span style="font-size: 18px; color: #111;">{company_name}</span> ({company_code})</p>
             
             <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
                 <tr style="border-bottom: 1px solid #eee;">
                     <td style="padding: 8px 0; color: #666; font-size: 14px;"><strong>Placement Type</strong></td>
-                    <td style="padding: 8px 0; font-size: 14px; text-align: right;">{company_record.placementtype or 'N/A'}</td>
+                    <td style="padding: 8px 0; font-size: 14px; text-align: right;">{placement_type}</td>
                 </tr>
                 <tr style="border-bottom: 1px solid #eee;">
                     <td style="padding: 8px 0; color: #666; font-size: 14px;"><strong>Internship Type</strong></td>
-                    <td style="padding: 8px 0; font-size: 14px; text-align: right;">{company_record.internshiptype or 'N/A'}</td>
+                    <td style="padding: 8px 0; font-size: 14px; text-align: right;">{internship_type}</td>
                 </tr>
                 <tr style="border-bottom: 1px solid #eee;">
                     <td style="padding: 8px 0; color: #666; font-size: 14px;"><strong>Package (LPA)</strong></td>
                     <td style="padding: 8px 0; font-size: 14px; text-align: right; color: #2e7d32; font-weight: bold;">
-                        {company_record.maxPackage or 'N/A'} (Max) / {company_record.minPackage or 'N/A'} (Min)
+                        {max_pkg} (Max) / {min_pkg} (Min)
                     </td>
                 </tr>
                 <tr style="border-bottom: 1px solid #eee;">
                     <td style="padding: 8px 0; color: #666; font-size: 14px;"><strong>Registration Window</strong></td>
                     <td style="padding: 8px 0; font-size: 14px; text-align: right;">
-                        {company_record.regStartdate or 'N/A'} {company_record.regStarttime or ''}<br/>
+                        {reg_start}<br/>
                         to<br/>
-                        {company_record.regEnddate or 'N/A'} {company_record.regEndtime or ''}
+                        {reg_end}
                     </td>
                 </tr>
                 <tr style="border-bottom: 1px solid #eee;">
                     <td style="padding: 8px 0; color: #666; font-size: 14px;"><strong>Academic Cycle</strong></td>
-                    <td style="padding: 8px 0; font-size: 14px; text-align: right;">{company_record.academicyear or 'N/A'}</td>
+                    <td style="padding: 8px 0; font-size: 14px; text-align: right;">{academic_year}</td>
                 </tr>
                 <tr style="border-bottom: 1px solid #eee;">
                     <td style="padding: 8px 0; color: #666; font-size: 14px;"><strong>Your Matched Branch</strong></td>
-                    <td style="padding: 8px 0; font-size: 14px; text-align: right; color: #1976d2; font-weight: bold;">{user_branch}</td>
+                    <td style="padding: 8px 0; font-size: 14px; text-align: right; color: #1976d2; font-weight: bold;">{user_branch_esc}</td>
                 </tr>
             </table>
 
             <div style="background-color: #f1f8ff; border-left: 4px solid #0366d6; padding: 12px; margin: 18px 0; border-radius: 4px; font-size: 13px;">
                 <strong>Eligible Programs:</strong><br/>
-                <span style="color: #444;">{programs}</span>
+                <span style="color: #444;">{programs_esc}</span>
             </div>
 
             <div style="text-align: center; margin: 24px 0 10px 0;">
-                <a href="https://tpo.vierp.in/company-dashboard" 
-                   style="background-color: #0366d6; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 6px; font-weight: bold; font-size: 15px; display: inline-block;">
-                    Open Official TPO Portal
-                </a>
+                {portal_button}
             </div>
             
-            <p style="font-size: 12px; color: #777; text-align: center; margin-top: 10px;">Detected at: {now_ist}</p>
+            <p style="font-size: 12px; color: #777; text-align: center; margin-top: 10px;">Detected at: {now_ist_esc}</p>
         </div>
 
         <div style="background-color: #fafbfc; border-top: 1px solid #eaecef; padding: 14px 24px; font-size: 12px; color: #6a737d; text-align: center;">
             <p style="margin: 0 0 6px 0;">You are receiving this because you subscribed with your VIT Pune 2028 email.</p>
             <p style="margin: 0;">
-                <a href="{pref_url}" style="color: #0366d6; text-decoration: none;">Manage Preferences</a>
+                <a href="{safe_pref_url}" style="color: #0366d6; text-decoration: none;">Manage Preferences</a>
                 &nbsp;|&nbsp;
-                <a href="{unsub_url}" style="color: #d73a49; text-decoration: none;">Unsubscribe</a>
+                <a href="{safe_unsub_url}" style="color: #d73a49; text-decoration: none;">Unsubscribe</a>
             </p>
         </div>
     </div>
