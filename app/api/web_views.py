@@ -95,8 +95,14 @@ def unsubscribe_page():
 # This must come LAST to not shadow API endpoints
 @router.get("/{full_path:path}", response_class=HTMLResponse)
 def spa_catchall(full_path: str):
-    # Never intercept API, health, or static asset paths
-    if full_path.startswith("api/") or full_path.startswith("health") or full_path.startswith("assets/"):
+    # Never intercept API, health, static asset, or documentation paths
+    if (
+        full_path.startswith("api/")
+        or full_path.startswith("health")
+        or full_path.startswith("assets/")
+        or full_path in ("docs", "openapi.json", "redoc")
+        or full_path.startswith("docs/")
+    ):
         from fastapi.responses import JSONResponse
         return JSONResponse({"detail": "Not found"}, status_code=404)
     return spa_response()

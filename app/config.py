@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     PUBLIC_HOST: str = "127.0.0.1"
     PUBLIC_PORT: int = 8000
     COOKIE_SECURE: bool = True
+    ENABLE_DOCS: bool = False
+    HSTS_MAX_AGE: int = 86400
 
     # Rate Limiting Configuration (Per minute or per window)
     RATE_LIMIT_SIGNUP_PER_IP: int = 30

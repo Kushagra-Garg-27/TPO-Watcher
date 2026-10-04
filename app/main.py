@@ -8,6 +8,16 @@ import uvicorn
 from app.api.app import app
 from app.config import settings
 
+def get_uvicorn_config(app_obj=None) -> uvicorn.Config:
+    return uvicorn.Config(
+        app=app_obj or app,
+        host=settings.PUBLIC_HOST,
+        port=settings.PUBLIC_PORT,
+        log_level=settings.LOG_LEVEL.lower(),
+        access_log=False,
+        server_header=False,
+    )
+
 async def main():
     setup_logging()
     
@@ -26,13 +36,7 @@ async def main():
         if args.once:
             await watcher.check_once()
         else:
-            config = uvicorn.Config(
-                app=app,
-                host=settings.PUBLIC_HOST,
-                port=settings.PUBLIC_PORT,
-                log_level=settings.LOG_LEVEL.lower(),
-                access_log=False
-            )
+            config = get_uvicorn_config()
             server = uvicorn.Server(config)
             await asyncio.gather(
                 watcher.run_forever(),
