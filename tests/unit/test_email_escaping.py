@@ -217,9 +217,9 @@ def test_email_service_escapes_user_input(monkeypatch):
     _, _, verify_html = captured[0]
     assert "<script>alert(1)</script>" not in verify_html
     assert "student&lt;script&gt;alert(1)&lt;/script&gt;@vit.edu" in verify_html
-    assert f"{settings.BASE_URL}/api/v1/auth/verify?token=dummy_token_123" in verify_html
+    assert f"{settings.BASE_URL}/verify#token=dummy_token_123" in verify_html
 
     # Preference email does not leak raw script
     _, _, pref_html = captured[1]
     assert "<script>alert(1)</script>" not in pref_html
-    assert f"{settings.BASE_URL}/api/v1/preferences/request?token=dummy_token_456" in pref_html
+    assert f"{settings.BASE_URL}/preferences/confirm#token=dummy_token_456" in pref_html

@@ -1,42 +1,39 @@
 import { useState } from 'react'
 import { motion } from 'framer-motion'
-import { CheckCircle2, AlertCircle, Loader2, BellOff, ArrowRight } from 'lucide-react'
+import { AlertCircle, Loader2, ShieldCheck, ArrowRight } from 'lucide-react'
 import { api } from '../lib/api'
 
-interface UnsubscribePageProps {
+interface PreferencesConfirmPageProps {
   token: string
   navigate: (path: string) => void
 }
 
-type UnsubscribeState = 'confirming' | 'loading' | 'success' | 'error'
+type ConfirmState = 'confirming' | 'loading' | 'error'
 
-export function UnsubscribePage({ token, navigate }: UnsubscribePageProps) {
-  const [state, setState] = useState<UnsubscribeState>(() => {
+export function PreferencesConfirmPage({ token, navigate }: PreferencesConfirmPageProps) {
+  const [state, setState] = useState<ConfirmState>(() => {
     if (!token) return 'error'
     return 'confirming'
   })
-
-  const [message, setMessage] = useState(() => {
-    if (!token) {
-      return 'The unsubscribe token is missing. Please use the link directly from your email.'
-    }
+  const [errorMessage, setErrorMessage] = useState(() => {
+    if (!token) return 'The preference access token is missing. Please use the link directly from your email.'
     return ''
   })
 
   async function handleConfirm() {
     if (!token) {
       setState('error')
-      setMessage('The unsubscribe token is missing. Please use the link directly from your email.')
+      setErrorMessage('The preference access token is missing. Please use the link directly from your email.')
       return
     }
 
     setState('loading')
-    const res = await api.unsubscribeConfirm(token)
+    const res = await api.preferencesConfirm(token)
     if (res.ok) {
-      setState('success')
+      navigate('/preferences')
     } else {
       setState('error')
-      setMessage(res.error || 'Unsubscribe request failed. The token may have expired or already been used.')
+      setErrorMessage(res.error || 'Invalid or expired preference link. Please request a new link.')
     }
   }
 
@@ -53,25 +50,25 @@ export function UnsubscribePage({ token, navigate }: UnsubscribePageProps) {
         >
           {state === 'confirming' && (
             <>
-              <div className="w-16 h-16 rounded-full bg-warning-500/10 border border-warning-500/30 flex items-center justify-center mx-auto mb-5 text-warning-500">
-                <BellOff className="h-7 w-7" />
+              <div className="w-16 h-16 rounded-full bg-accent/10 border border-accent/30 flex items-center justify-center mx-auto mb-5 text-accent">
+                <ShieldCheck className="h-8 w-8" />
               </div>
-              <span className="text-[10px] font-mono tracking-[0.2em] text-warning-500 uppercase block mb-1">
-                CONFIRMATION REQUIRED
+              <span className="text-[10px] font-mono tracking-[0.2em] text-accent uppercase block mb-1">
+                SECURE ACCESS
               </span>
               <h1 className="font-display text-2xl uppercase text-foreground tracking-wide">
-                CANCEL TPO ALERTS?
+                MANAGE PREFERENCES
               </h1>
               <p className="mt-3 text-sm text-muted font-light max-w-sm mx-auto font-sans leading-relaxed">
-                You will stop receiving automated email alerts for newly detected VIT Pune placement and internship opportunities.
+                Click below to authenticate your session and update your notification preferences.
               </p>
               <div className="mt-8 flex flex-col gap-3">
                 <button
                   type="button"
                   onClick={handleConfirm}
-                  className="btn-destructive w-full text-xs tracking-widest justify-center py-3.5"
+                  className="btn-primary w-full text-xs tracking-widest justify-center py-3.5"
                 >
-                  Confirm unsubscribe
+                  Continue to preferences
                   <ArrowRight className="h-3.5 w-3.5 ml-1" />
                 </button>
                 <button
@@ -79,7 +76,7 @@ export function UnsubscribePage({ token, navigate }: UnsubscribePageProps) {
                   onClick={() => navigate('/')}
                   className="btn-secondary w-full text-xs tracking-widest justify-center py-3.5"
                 >
-                  KEEP MY SUBSCRIPTION ACTIVE
+                  RETURN TO HOME
                 </button>
               </div>
             </>
@@ -89,35 +86,11 @@ export function UnsubscribePage({ token, navigate }: UnsubscribePageProps) {
             <>
               <Loader2 className="h-12 w-12 text-accent animate-spin mx-auto mb-5" />
               <h1 className="font-display text-2xl uppercase tracking-wide text-foreground">
-                UNSUBSCRIBING...
+                AUTHENTICATING...
               </h1>
               <p className="mt-2 text-xs font-mono text-muted tracking-wider">
-                PROCESSING REQUEST
+                EXCHANGING SINGLE-USE TOKEN
               </p>
-            </>
-          )}
-
-          {state === 'success' && (
-            <>
-              <div className="w-16 h-16 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center mx-auto mb-5 text-emerald-400">
-                <CheckCircle2 className="h-8 w-8" />
-              </div>
-              <span className="text-[10px] font-mono tracking-[0.2em] text-accent uppercase block mb-1">
-                UNSUBSCRIBED
-              </span>
-              <h1 className="font-display text-2xl uppercase text-foreground tracking-wide">
-                SUBSCRIPTION CANCELLED
-              </h1>
-              <p className="mt-3 text-sm text-muted font-light max-w-sm mx-auto font-sans leading-relaxed">
-                You have been unsubscribed from VIT TPO alerts. Any pending notifications have been cancelled.
-              </p>
-              <button
-                type="button"
-                onClick={() => navigate('/')}
-                className="mt-8 btn-secondary w-full text-xs tracking-widest justify-center py-3.5"
-              >
-                RETURN TO HOME
-              </button>
             </>
           )}
 
@@ -127,21 +100,30 @@ export function UnsubscribePage({ token, navigate }: UnsubscribePageProps) {
                 <AlertCircle className="h-8 w-8" />
               </div>
               <span className="text-[10px] font-mono tracking-[0.2em] text-danger-500 uppercase block mb-1">
-                UNSUBSCRIBE FAILED
+                ACCESS FAILED
               </span>
               <h1 className="font-display text-2xl uppercase text-foreground tracking-wide">
                 LINK INVALID OR EXPIRED
               </h1>
               <p className="mt-3 text-sm text-muted font-light max-w-sm mx-auto font-sans leading-relaxed">
-                {message}
+                {errorMessage}
               </p>
-              <button
-                type="button"
-                onClick={() => navigate('/')}
-                className="mt-8 btn-secondary w-full text-xs tracking-widest justify-center py-3.5"
-              >
-                RETURN TO HOME
-              </button>
+              <div className="mt-8 flex flex-col gap-3">
+                <button
+                  type="button"
+                  onClick={() => navigate('/preferences')}
+                  className="btn-primary w-full text-xs tracking-widest justify-center py-3.5"
+                >
+                  REQUEST A NEW LINK
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate('/')}
+                  className="btn-secondary w-full text-xs tracking-widest justify-center py-3.5"
+                >
+                  RETURN TO HOME
+                </button>
+              </div>
             </>
           )}
         </motion.div>

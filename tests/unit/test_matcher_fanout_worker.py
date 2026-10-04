@@ -160,15 +160,22 @@ async def test_delivery_worker_processing(temp_fanout_db):
     assert mock_notifier._send_email_to.call_count == 1
 
     # Verify dedicated tokens were created for the user
-    unsub_token = token_repo.get_valid_token(
-        mock_notifier._send_email_to.call_args[0][2].split("unsubscribe?token=")[1].split('"')[0],
-        "UNSUBSCRIBE"
-    )
-    # The URL in email has the raw token! Let's verify token hashing works.
-    raw_token_in_email = mock_notifier._send_email_to.call_args[0][2].split("unsubscribe?token=")[1].split('"')[0]
+    email_body = mock_notifier._send_email_to.call_args[0][2]
+    if "unsubscribe#token=" in email_body:
+        raw_token_in_email = email_body.split("unsubscribe#token=")[1].split('"')[0]
+    else:
+        raw_token_in_email = email_body.split("unsubscribe?token=")[1].split('"')[0]
+
     import hashlib
     h = hashlib.sha256(raw_token_in_email.encode("utf-8")).hexdigest()
     assert token_repo.get_valid_token(h, "UNSUBSCRIBE") is not None
+
+    # Verify RFC 8058 List-Unsubscribe headers passed in extra_headers
+    call_kwargs = mock_notifier._send_email_to.call_args[1] if len(mock_notifier._send_email_to.call_args) > 1 else {}
+    extra_headers = call_kwargs.get("extra_headers")
+    assert extra_headers is not None
+    assert "List-Unsubscribe" in extra_headers
+    assert "List-Unsubscribe-Post" in extra_headers
 
 
 def test_all_12_current_btech_programmes_exist_and_are_unique():

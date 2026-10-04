@@ -10,7 +10,7 @@ class EmailService:
         self.notifier = notifier or EmailNotificationProvider()
 
     def send_verification_email(self, to_email: str, raw_token: str) -> bool:
-        verify_url = f"{settings.BASE_URL}/api/v1/auth/verify?token={raw_token}"
+        verify_url = f"{settings.BASE_URL}/verify#token={raw_token}"
         safe_verify_url = escape_html(verify_url)
         safe_email = escape_html(to_email)
         subject = "Verify your email for VIT TPO Watcher (Batch 2028)"
@@ -41,7 +41,7 @@ class EmailService:
         return self.notifier._send_email_to(to_email, subject, html)
 
     def send_preference_link_email(self, to_email: str, raw_token: str) -> bool:
-        access_url = f"{settings.BASE_URL}/api/v1/preferences/request?token={raw_token}"
+        access_url = f"{settings.BASE_URL}/preferences/confirm#token={raw_token}"
         safe_access_url = escape_html(access_url)
         safe_email = escape_html(to_email)
         subject = "Your Preference Management Link - VIT TPO Watcher"

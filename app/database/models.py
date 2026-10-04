@@ -85,3 +85,20 @@ class DeliveryRecord(BaseModel):
     error_message: Optional[str] = None
     created_at: datetime
     sent_at: Optional[datetime] = None
+
+
+class ConfirmTokenPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    token: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("token")
+    @classmethod
+    def validate_token(cls, v: str) -> str:
+        if not v or not isinstance(v, str):
+            raise ValueError("Token cannot be empty.")
+        from app.api.security_utils import is_valid_token_format
+        stripped = v.strip()
+        if not is_valid_token_format(stripped):
+            raise ValueError("Invalid token format.")
+        return stripped

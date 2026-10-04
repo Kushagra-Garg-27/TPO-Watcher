@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Cookie, Response, 
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.config import settings
-from app.database.models import PreferenceUpdate, PreferenceResponse
+from app.database.models import PreferenceUpdate, PreferenceResponse, ConfirmTokenPayload
 from app.database.interfaces import UserRepositoryProtocol, TokenRepositoryProtocol
 from app.api.session import create_session_token, verify_session_token, revoke_session_token
 from app.api.email_service import EmailService, get_email_service
@@ -76,18 +76,24 @@ class RequestLinkPayload(BaseModel):
             raise ValueError("Invalid email format.")
         return norm
 
-@router.get("/preferences/request")
-def exchange_magic_link_for_session(
+@router.post("/preferences/confirm")
+def exchange_magic_link_confirm(
     request: Request,
-    token: str = Query(..., description="15-minute single-use action token"),
+    response: Response,
+    payload: ConfirmTokenPayload,
     repos = Depends(get_db_repos)
 ):
     """
-    Exchanges a 15-minute action token for a 1-hour secure HttpOnly session cookie,
-    ensuring no long-lived bearer tokens linger in browser history or URLs.
-    Includes session fixation prevention and rate limiting.
+    Explicit, user-initiated magic link confirmation endpoint.
+    Exchanges a single-use action token for a secure 1-hour HttpOnly session cookie.
+    Rejects query-string tokens.
     """
-    # 0. Rate limiting to prevent token brute force
+    if "token" in request.query_params:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token must be passed in JSON body, not query string."
+        )
+
     client_ip = get_client_ip(request)
     check_rate_limit(
         request=request,
@@ -96,38 +102,28 @@ def exchange_magic_link_for_session(
         window_seconds=60
     )
 
-    # 1. Early input validation
-    if not is_valid_token_format(token):
-        logger.warning("Magic link exchange rejected: malformed token format.")
-        return HTMLResponse(
-            content="""<!DOCTYPE html>
-<html><body style="font-family: sans-serif; text-align: center; padding: 50px;">
-    <h2 style="color: #d32f2f;">Invalid or Expired Link</h2>
-    <p>This preference access link is invalid, already used, or expired (15-minute limit).</p>
-    <p><a href="/preferences" style="color: #0366d6;">Request a New Link</a></p>
-</body></html>""",
-            status_code=status.HTTP_400_BAD_REQUEST
-        )
-
-    fingerprint = get_token_fingerprint(token)
+    fingerprint = get_token_fingerprint(payload.token)
     user_repo, token_repo = repos
 
-    token_hash = hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
+    token_hash = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
     token_row = token_repo.get_valid_token(token_hash, "MANAGE_PREFS")
 
     if not token_row:
-        logger.warning(f"Magic link exchange failed: invalid or expired token (fingerprint: {fingerprint}).")
-        return HTMLResponse(
-            content="""<!DOCTYPE html>
-<html><body style="font-family: sans-serif; text-align: center; padding: 50px;">
-    <h2 style="color: #d32f2f;">Invalid or Expired Link</h2>
-    <p>This preference access link is invalid, already used, or expired (15-minute limit).</p>
-    <p><a href="/preferences" style="color: #0366d6;">Request a New Link</a></p>
-</body></html>""",
-            status_code=status.HTTP_400_BAD_REQUEST
+        logger.warning(f"Magic link confirm failed: invalid or expired token (fingerprint: {fingerprint}).")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired preference link."
         )
 
     user_id = token_row["user_id"]
+    user = user_repo.get_by_id(user_id)
+    if not user or user.get("is_active") != 1:
+        logger.warning(f"Session creation rejected: user {user_id} not found or deactivated.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User account is deactivated or not found."
+        )
+
     # Mark token used immediately (single-use exchange)
     token_repo.mark_token_used(token_row["id"])
 
@@ -148,11 +144,7 @@ def exchange_magic_link_for_session(
         or request.headers.get("x-forwarded-proto") == "https"
     )
 
-    logger.info(f"Magic link successfully exchanged for session: user {user_id} (fingerprint: {fingerprint}).")
-
-    # Redirect to preference management page with session cookie
-    redirect = RedirectResponse(url="/preferences", status_code=status.HTTP_303_SEE_OTHER)
-    redirect.set_cookie(
+    response.set_cookie(
         key="tpo_session",
         value=session_token,
         max_age=3600,
@@ -161,7 +153,37 @@ def exchange_magic_link_for_session(
         secure=is_secure,
         path="/"
     )
-    return redirect
+
+    logger.info(f"Magic link successfully exchanged for session: user {user_id} (fingerprint: {fingerprint}).")
+
+    return {
+        "status": "success",
+        "message": "Preferences session authenticated."
+    }
+
+
+@router.get("/preferences/request")
+def exchange_magic_link_legacy(
+    request: Request,
+    token: str = Query(..., description="15-minute single-use action token")
+):
+    """
+    Legacy preferences magic-link redirector.
+    Harmless, non-mutating 303 redirect to the SPA preferences confirmation view with URL fragment.
+    Does NOT validate, consume, or establish a session.
+    """
+    client_ip = get_client_ip(request)
+    check_rate_limit(
+        request=request,
+        key=f"exchange:ip:{client_ip}",
+        max_requests=getattr(settings, "RATE_LIMIT_EXCHANGE_PER_IP", 30),
+        window_seconds=60
+    )
+
+    return RedirectResponse(
+        url=f"/preferences/confirm#token={token}",
+        status_code=status.HTTP_303_SEE_OTHER
+    )
 
 @router.post("/preferences/request-link")
 def request_preference_link(

@@ -150,19 +150,25 @@ def test_verification_flow(test_client):
         expires_at=datetime.now(timezone.utc) + timedelta(hours=24)
     )
 
-    # Click verify
-    res = test_client.get(f"/api/v1/auth/verify?token={raw_token}")
-    assert res.status_code == 200
-    assert "Email Verified" in res.text
+    # Legacy GET link is non-mutating 303 redirect to fragment URL
+    res_get = test_client.get(f"/api/v1/auth/verify?token={raw_token}", follow_redirects=False)
+    assert res_get.status_code == 303
+    assert res_get.headers["location"] == f"/verify#token={raw_token}"
+    assert test_client.user_repo.get_by_email("verify_me@vit.edu")["is_verified"] == 0
+
+    # Explicit confirm POST verifies the user
+    res_post = test_client.post("/api/v1/auth/verify/confirm", json={"token": raw_token})
+    assert res_post.status_code == 200
+    assert res_post.json()["status"] == "success"
 
     # Verify state in DB
     updated_user = test_client.user_repo.get_by_email("verify_me@vit.edu")
     assert updated_user["is_verified"] == 1
 
-    # Second click must fail (one-time use)
-    res_second = test_client.get(f"/api/v1/auth/verify?token={raw_token}")
+    # Second confirm POST must fail (one-time use replay prevention)
+    res_second = test_client.post("/api/v1/auth/verify/confirm", json={"token": raw_token})
     assert res_second.status_code == 400
-    assert "Invalid or Expired" in res_second.text
+    assert "Invalid or expired" in res_second.json()["detail"]
 
 def test_unsubscribe_endpoint(test_client):
     user_id = test_client.user_repo.create_user("unsub_test@vit.edu", 2028, "VIT_CE")
@@ -177,17 +183,24 @@ def test_unsubscribe_endpoint(test_client):
         expires_at=datetime.now(timezone.utc) + timedelta(days=30)
     )
 
-    # Unsubscribe
-    res = test_client.get(f"/api/v1/unsubscribe?token={raw_unsub}")
-    assert res.status_code == 200
-    assert "Unsubscribed Successfully" in res.text
+    # Legacy GET unsubscribe link is non-mutating 303 redirect
+    res_get = test_client.get(f"/api/v1/unsubscribe?token={raw_unsub}", follow_redirects=False)
+    assert res_get.status_code == 303
+    assert res_get.headers["location"] == f"/unsubscribe#token={raw_unsub}"
+    assert test_client.user_repo.get_by_id(user_id)["is_active"] == 1
+
+    # Explicit confirm POST unsubscribes the user
+    res_post = test_client.post("/api/v1/unsubscribe/confirm", json={"token": raw_unsub})
+    assert res_post.status_code == 200
+    assert res_post.json()["status"] == "success"
 
     user = test_client.user_repo.get_by_id(user_id)
     assert user["is_active"] == 0
 
-    # Token should now be spent
-    res_again = test_client.get(f"/api/v1/unsubscribe?token={raw_unsub}")
+    # Token should now be spent (replay rejected)
+    res_again = test_client.post("/api/v1/unsubscribe/confirm", json={"token": raw_unsub})
     assert res_again.status_code == 400
+    assert "Invalid or expired" in res_again.json()["detail"]
 
 def test_preference_management_lifecycle(test_client):
     user_id = test_client.user_repo.create_user("pref_test@vit.edu", 2028, "VIT_CE")
@@ -206,12 +219,18 @@ def test_preference_management_lifecycle(test_client):
     res_unauth = test_client.get("/api/v1/preferences")
     assert res_unauth.status_code == 401
 
-    # 2. Exchange 15-minute token for 1-hour session
-    res_exchange = test_client.get(f"/api/v1/preferences/request?token={raw_pref_token}", follow_redirects=False)
-    assert res_exchange.status_code == 303
+    # 2. Legacy GET link is non-mutating 303 redirect without session cookie
+    res_legacy = test_client.get(f"/api/v1/preferences/request?token={raw_pref_token}", follow_redirects=False)
+    assert res_legacy.status_code == 303
+    assert res_legacy.headers["location"] == f"/preferences/confirm#token={raw_pref_token}"
+    assert "tpo_session" not in res_legacy.cookies
+
+    # 3. Explicit confirm POST exchanges token for session cookie
+    res_exchange = test_client.post("/api/v1/preferences/confirm", json={"token": raw_pref_token})
+    assert res_exchange.status_code == 200
     assert "tpo_session" in res_exchange.cookies
 
-    # 3. Retrieve preferences using session cookie
+    # 4. Retrieve preferences using session cookie
     cookies = {"tpo_session": res_exchange.cookies["tpo_session"]}
     res_get = test_client.get("/api/v1/preferences", cookies=cookies)
     assert res_get.status_code == 200
@@ -219,7 +238,7 @@ def test_preference_management_lifecycle(test_client):
     assert prefs["email"] == "pref_test@vit.edu"
     assert prefs["pref_internship"] is True
 
-    # 4. Update preferences
+    # 5. Update preferences
     res_put = test_client.put("/api/v1/preferences", json={
         "pref_internship": True,
         "pref_placement": False,
@@ -233,7 +252,7 @@ def test_preference_management_lifecycle(test_client):
     assert updated_prefs["pref_placement"] == 0
     assert updated_prefs["pref_ppo"] == 0
 
-    # 5. Request fresh preference access link (dispatches MANAGE_PREFS email to fake sink)
+    # 6. Request fresh preference access link (dispatches MANAGE_PREFS email to fake sink)
     res_req = test_client.post("/api/v1/preferences/request-link", json={"email": "pref_test@vit.edu"})
     assert res_req.status_code == 200
     assert any(

@@ -91,9 +91,15 @@ def test_auth_01_valid_signup_verification_succeeds(sec_client):
     assert len(sec_client.email_sink.sent_emails) == 1
     raw_token = sec_client.email_sink.sent_emails[0]["raw_token"]
 
-    verify_res = sec_client.get(f"/api/v1/auth/verify?token={raw_token}")
+    # Legacy GET link is harmless 303 redirect
+    get_res = sec_client.get(f"/api/v1/auth/verify?token={raw_token}", follow_redirects=False)
+    assert get_res.status_code == 303
+    assert get_res.headers["location"] == f"/verify#token={raw_token}"
+    assert sec_client.user_repo.get_by_email("auth01@vit.edu")["is_verified"] == 0
+
+    # Confirm POST verifies the user
+    verify_res = sec_client.post("/api/v1/auth/verify/confirm", json={"token": raw_token})
     assert verify_res.status_code == 200
-    assert "Email Verified" in verify_res.text
 
     user = sec_client.user_repo.get_by_email("auth01@vit.edu")
     assert user["is_verified"] == 1
@@ -116,9 +122,9 @@ def test_auth_02_expired_signup_token_fails(sec_client):
         expires_at=datetime.now(timezone.utc) - timedelta(hours=1)
     )
 
-    res = sec_client.get(f"/api/v1/auth/verify?token={raw_token}")
+    res = sec_client.post("/api/v1/auth/verify/confirm", json={"token": raw_token})
     assert res.status_code == 400
-    assert "Invalid or Expired Link" in res.text
+    assert "Invalid or expired" in res.json()["detail"]
 
     user = sec_client.user_repo.get_by_id(user_id)
     assert user["is_verified"] == 0
@@ -136,13 +142,13 @@ def test_auth_03_signup_token_cannot_be_reused(sec_client):
     raw_token = sec_client.email_sink.sent_emails[0]["raw_token"]
 
     # First attempt: succeeds
-    res1 = sec_client.get(f"/api/v1/auth/verify?token={raw_token}")
+    res1 = sec_client.post("/api/v1/auth/verify/confirm", json={"token": raw_token})
     assert res1.status_code == 200
 
     # Second attempt: fails
-    res2 = sec_client.get(f"/api/v1/auth/verify?token={raw_token}")
+    res2 = sec_client.post("/api/v1/auth/verify/confirm", json={"token": raw_token})
     assert res2.status_code == 400
-    assert "Invalid or Expired Link" in res2.text
+    assert "Invalid or expired" in res2.json()["detail"]
 
 
 # -----------------------------------------------------------------------------
@@ -160,7 +166,7 @@ def test_auth_04_malformed_signup_token_fails_safely(sec_client):
         "' OR '1'='1",
     ]
     for token in malformed_tokens:
-        res = sec_client.get(f"/api/v1/auth/verify?token={token}")
+        res = sec_client.post("/api/v1/auth/verify/confirm", json={"token": token})
         assert res.status_code in (400, 422)
         assert res.status_code != 500
         assert "Internal Server Error" not in res.text
@@ -236,8 +242,15 @@ def test_auth_07_valid_magic_link_succeeds(sec_client):
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=15)
     )
 
-    res = sec_client.get(f"/api/v1/preferences/request?token={raw_token}", follow_redirects=False)
-    assert res.status_code == 303
+    # Legacy GET link is non-mutating 303 redirect
+    get_res = sec_client.get(f"/api/v1/preferences/request?token={raw_token}", follow_redirects=False)
+    assert get_res.status_code == 303
+    assert get_res.headers["location"] == f"/preferences/confirm#token={raw_token}"
+    assert "tpo_session" not in get_res.cookies
+
+    # Confirm POST creates session
+    res = sec_client.post("/api/v1/preferences/confirm", json={"token": raw_token})
+    assert res.status_code == 200
     assert "tpo_session" in res.cookies
 
     # Access preferences with received session
@@ -263,9 +276,9 @@ def test_auth_08_expired_magic_link_fails(sec_client):
         expires_at=datetime.now(timezone.utc) - timedelta(minutes=1)
     )
 
-    res = sec_client.get(f"/api/v1/preferences/request?token={raw_token}", follow_redirects=False)
+    res = sec_client.post("/api/v1/preferences/confirm", json={"token": raw_token})
     assert res.status_code == 400
-    assert "Invalid or Expired Link" in res.text
+    assert "Invalid or expired" in res.json()["detail"]
     assert "tpo_session" not in res.cookies
 
 
@@ -286,13 +299,13 @@ def test_auth_09_magic_link_cannot_be_reused(sec_client):
     )
 
     # First exchange succeeds
-    res1 = sec_client.get(f"/api/v1/preferences/request?token={raw_token}", follow_redirects=False)
-    assert res1.status_code == 303
+    res1 = sec_client.post("/api/v1/preferences/confirm", json={"token": raw_token})
+    assert res1.status_code == 200
 
     # Replay fails
-    res2 = sec_client.get(f"/api/v1/preferences/request?token={raw_token}", follow_redirects=False)
+    res2 = sec_client.post("/api/v1/preferences/confirm", json={"token": raw_token})
     assert res2.status_code == 400
-    assert "Invalid or Expired Link" in res2.text
+    assert "Invalid or expired" in res2.json()["detail"]
 
 
 # -----------------------------------------------------------------------------
@@ -301,7 +314,7 @@ def test_auth_09_magic_link_cannot_be_reused(sec_client):
 def test_auth_10_malformed_magic_link_fails(sec_client):
     malformed = ["", "bad/token", "a" * 500, "short", "bad token with spaces"]
     for t in malformed:
-        res = sec_client.get(f"/api/v1/preferences/request?token={t}")
+        res = sec_client.post("/api/v1/preferences/confirm", json={"token": t})
         assert res.status_code in (400, 422)
 
 
@@ -321,15 +334,21 @@ def test_auth_11_unsubscribe_token_is_single_use(sec_client):
         expires_at=datetime.now(timezone.utc) + timedelta(days=30)
     )
 
-    res1 = sec_client.get(f"/api/v1/unsubscribe?token={raw_token}")
+    # Legacy GET link is non-mutating 303
+    get_res = sec_client.get(f"/api/v1/unsubscribe?token={raw_token}", follow_redirects=False)
+    assert get_res.status_code == 303
+    assert sec_client.user_repo.get_by_id(user_id)["is_active"] == 1
+
+    # Confirm POST unsubscribes
+    res1 = sec_client.post("/api/v1/unsubscribe/confirm", json={"token": raw_token})
     assert res1.status_code == 200
-    assert "Unsubscribed Successfully" in res1.text
     user = sec_client.user_repo.get_by_id(user_id)
     assert user["is_active"] == 0
 
-    res2 = sec_client.get(f"/api/v1/unsubscribe?token={raw_token}")
+    # Replay fails
+    res2 = sec_client.post("/api/v1/unsubscribe/confirm", json={"token": raw_token})
     assert res2.status_code == 400
-    assert "Invalid or Expired" in res2.text
+    assert "Invalid or expired" in res2.json()["detail"]
 
 
 # -----------------------------------------------------------------------------
@@ -348,9 +367,9 @@ def test_auth_12_expired_unsubscribe_token_fails(sec_client):
         expires_at=datetime.now(timezone.utc) - timedelta(days=1)
     )
 
-    res = sec_client.get(f"/api/v1/unsubscribe?token={raw_token}")
+    res = sec_client.post("/api/v1/unsubscribe/confirm", json={"token": raw_token})
     assert res.status_code == 400
-    assert "Invalid or Expired" in res.text
+    assert "Invalid or expired" in res.json()["detail"]
 
     user = sec_client.user_repo.get_by_id(user_id)
     assert user["is_active"] == 1
@@ -370,8 +389,8 @@ def test_auth_13_session_cookie_is_httponly(sec_client):
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=15)
     )
 
-    res = sec_client.get(f"/api/v1/preferences/request?token={raw_token}", follow_redirects=False)
-    assert res.status_code == 303
+    res = sec_client.post("/api/v1/preferences/confirm", json={"token": raw_token})
+    assert res.status_code == 200
     set_cookie = res.headers.get("set-cookie", "")
     assert "httponly" in set_cookie.lower()
 
@@ -390,8 +409,8 @@ def test_auth_14_session_cookie_is_secure(sec_client):
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=15)
     )
 
-    res = sec_client.get(f"/api/v1/preferences/request?token={raw_token}", follow_redirects=False)
-    assert res.status_code == 303
+    res = sec_client.post("/api/v1/preferences/confirm", json={"token": raw_token})
+    assert res.status_code == 200
     set_cookie = res.headers.get("set-cookie", "")
     assert "secure" in set_cookie.lower()
 
@@ -410,8 +429,8 @@ def test_auth_15_session_cookie_has_samesite_lax_or_stricter(sec_client):
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=15)
     )
 
-    res = sec_client.get(f"/api/v1/preferences/request?token={raw_token}", follow_redirects=False)
-    assert res.status_code == 303
+    res = sec_client.post("/api/v1/preferences/confirm", json={"token": raw_token})
+    assert res.status_code == 200
     set_cookie = res.headers.get("set-cookie", "").lower()
     assert "samesite=lax" in set_cookie or "samesite=strict" in set_cookie
     assert "max-age=3600" in set_cookie
@@ -497,8 +516,8 @@ def test_auth_19_session_fixation_is_prevented(sec_client):
 
     # Client presents attacker session while exchanging magic link
     sec_client.cookies.set("tpo_session", attacker_session)
-    res = sec_client.get(f"/api/v1/preferences/request?token={raw_token}", follow_redirects=False)
-    assert res.status_code == 303
+    res = sec_client.post("/api/v1/preferences/confirm", json={"token": raw_token})
+    assert res.status_code == 200
     fresh_session = res.cookies["tpo_session"]
 
     # Fresh session is distinct and has different nonce
@@ -558,12 +577,12 @@ def test_auth_22_verification_brute_force_is_rate_limited(sec_client, monkeypatc
 
     for i in range(10):
         fake_token = secrets.token_urlsafe(32)
-        res = sec_client.get(f"/api/v1/auth/verify?token={fake_token}")
+        res = sec_client.post("/api/v1/auth/verify/confirm", json={"token": fake_token})
         assert res.status_code == 400
 
     # 11th attempt hits IP rate limit
     blocked_token = secrets.token_urlsafe(32)
-    res_blocked = sec_client.get(f"/api/v1/auth/verify?token={blocked_token}")
+    res_blocked = sec_client.post("/api/v1/auth/verify/confirm", json={"token": blocked_token})
     assert res_blocked.status_code == 429
     assert "Retry-After" in res_blocked.headers
 
@@ -620,14 +639,14 @@ def test_auth_24_logs_do_not_contain_raw_tokens_or_secrets(sec_client, caplog):
     signup_token = sec_client.email_sink.sent_emails[0]["raw_token"]
 
     # 2. Verify flow
-    sec_client.get(f"/api/v1/auth/verify?token={signup_token}")
+    sec_client.post("/api/v1/auth/verify/confirm", json={"token": signup_token})
 
     # 3. Preference link request
     sec_client.post("/api/v1/preferences/request-link", json={"email": "auth24@vit.edu"})
     pref_token = sec_client.email_sink.sent_emails[1]["raw_token"]
 
     # 4. Exchange magic link for session
-    res_ex = sec_client.get(f"/api/v1/preferences/request?token={pref_token}", follow_redirects=False)
+    res_ex = sec_client.post("/api/v1/preferences/confirm", json={"token": pref_token})
     session_cookie = res_ex.cookies.get("tpo_session")
 
     # 5. Access and update preferences
@@ -818,15 +837,17 @@ def test_rev_05_rate_limiting_spoofing_attempt_blocked_by_rightmost_ip(sec_clien
     # Attacker tries rotating the leftmost IP to evade rate limiting
     for i in range(5):
         spoofed_left = f"10.0.0.{i+1}"
-        res = sec_client.get(
-            "/api/v1/auth/verify?token=fake_token_test",
+        res = sec_client.post(
+            "/api/v1/auth/verify/confirm",
+            json={"token": "fake_token_test_12345"},
             headers={"x-forwarded-for": f"{spoofed_left}, {real_ip}"}
         )
         assert res.status_code == 400
 
     # 6th request with yet another spoofed leftmost IP must STILL be rate-limited
-    res_blocked = sec_client.get(
-        "/api/v1/auth/verify?token=fake_token_test",
+    res_blocked = sec_client.post(
+        "/api/v1/auth/verify/confirm",
+        json={"token": "fake_token_test_12345"},
         headers={"x-forwarded-for": f"10.0.0.99, {real_ip}"}
     )
     assert res_blocked.status_code == 429
@@ -848,12 +869,12 @@ def test_rev_06_cookie_secure_behind_proxy_even_if_http_forwarded_proto_sent(sec
     )
 
     # Client / proxy sends X-Forwarded-Proto: http
-    res = sec_client.get(
-        f"/api/v1/preferences/request?token={raw_token}",
-        headers={"x-forwarded-proto": "http"},
-        follow_redirects=False
+    res = sec_client.post(
+        "/api/v1/preferences/confirm",
+        json={"token": raw_token},
+        headers={"x-forwarded-proto": "http"}
     )
-    assert res.status_code == 303
+    assert res.status_code == 200
     set_cookie = res.headers.get("set-cookie", "").lower()
     # Must still be Secure because COOKIE_SECURE is True by default
     assert "secure" in set_cookie

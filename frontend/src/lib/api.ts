@@ -104,6 +104,27 @@ export const api = {
     })
   },
 
+  async verifyConfirm(token: string): Promise<ApiResult<{ message: string; status: string }>> {
+    return request('/api/v1/auth/verify/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    })
+  },
+
+  async unsubscribeConfirm(token: string): Promise<ApiResult<{ message: string; status: string }>> {
+    return request('/api/v1/unsubscribe/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    })
+  },
+
+  async preferencesConfirm(token: string): Promise<ApiResult<{ message: string; status: string }>> {
+    return request('/api/v1/preferences/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    })
+  },
+
   async getOpportunities(): Promise<ApiResult<Opportunity[]>> {
     return request('/api/v1/opportunities')
   },

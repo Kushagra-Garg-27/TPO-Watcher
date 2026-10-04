@@ -4,10 +4,10 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from app.config import settings
-from app.database.models import UserCreate
+from app.database.models import UserCreate, ConfirmTokenPayload
 from app.database.interfaces import UserRepositoryProtocol, TokenRepositoryProtocol
 from app.subscribers.canonical import CanonicalBranch
 from app.api.email_service import EmailService, get_email_service
@@ -135,13 +135,23 @@ def signup(
         "message": "Verification link sent! Please check your email and click the link within 24 hours to activate notifications."
     }
 
-@router.get("/auth/verify", response_class=HTMLResponse)
-def verify_email(
+@router.post("/auth/verify/confirm")
+def verify_email_confirm(
     request: Request,
-    token: str = Query(..., description="One-time verification token"),
+    payload: ConfirmTokenPayload,
     repos = Depends(get_db_repos)
 ):
-    # 0. Rate limiting to prevent token brute force
+    """
+    Explicit, non-idempotent confirm-before-consume verification endpoint.
+    Consumes token and activates user subscription ONLY upon intentional user POST.
+    Rejects query-string tokens.
+    """
+    if "token" in request.query_params:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token must be passed in JSON body, not query string."
+        )
+
     client_ip = get_client_ip(request)
     check_rate_limit(
         request=request,
@@ -150,46 +160,70 @@ def verify_email(
         window_seconds=60
     )
 
-    # 1. Early input validation
-    if not is_valid_token_format(token):
-        logger.warning("Verification rejected: malformed token format.")
-        return spa_response(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            fallback_text="<h2>Invalid or Expired Link</h2><p>This verification link is invalid, already used, or has expired after 24 hours.</p>"
-        )
-
-    fingerprint = get_token_fingerprint(token)
+    fingerprint = get_token_fingerprint(payload.token)
     user_repo, token_repo = repos
 
-    token_hash = hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
+    token_hash = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
     token_row = token_repo.get_valid_token(token_hash, "SIGNUP_VERIFY")
 
     if not token_row:
-        logger.warning(f"Verification failed: token not found or already consumed (fingerprint: {fingerprint}).")
-        return spa_response(
+        logger.warning(f"Verification confirm failed: token not found or already consumed (fingerprint: {fingerprint}).")
+        raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            fallback_text="<h2>Invalid or Expired Link</h2><p>This verification link is invalid, already used, or has expired after 24 hours.</p>"
+            detail="Invalid or expired verification link."
         )
 
-    # Mark user verified and token used (one-time use)
     user_repo.set_verified(token_row["user_id"])
     token_repo.mark_token_used(token_row["id"])
     logger.info(f"Email verified successfully for user {token_row['user_id']} (fingerprint: {fingerprint}).")
 
-    return spa_response(
-        status_code=status.HTTP_200_OK,
-        fallback_text="<h2>✓ Email Verified!</h2><p>Your email subscription for VIT Pune 2028 TPO Alerts is now active.</p>"
+    return {
+        "status": "success",
+        "message": "Email verified successfully! You will now receive verified TPO alerts."
+    }
+
+
+@router.get("/auth/verify")
+def verify_email_legacy(
+    request: Request,
+    token: str = Query(..., description="One-time verification token")
+):
+    """
+    Legacy verification link redirector.
+    Harmless, non-mutating 303 redirect to the SPA verify view with URL fragment.
+    Does NOT validate, consume, or reveal token validity.
+    """
+    client_ip = get_client_ip(request)
+    check_rate_limit(
+        request=request,
+        key=f"verify:ip:{client_ip}",
+        max_requests=getattr(settings, "RATE_LIMIT_VERIFY_PER_IP", 30),
+        window_seconds=60
+    )
+
+    return RedirectResponse(
+        url=f"/verify#token={token}",
+        status_code=status.HTTP_303_SEE_OTHER
     )
 
 
-@router.get("/unsubscribe", response_class=HTMLResponse)
-@router.post("/unsubscribe", response_class=HTMLResponse)
-def unsubscribe(
+@router.post("/unsubscribe/confirm")
+def unsubscribe_confirm(
     request: Request,
-    token: str = Query(..., description="One-time unsubscribe token"),
+    payload: ConfirmTokenPayload,
     repos = Depends(get_db_repos)
 ):
-    # 0. Rate limiting to prevent token abuse
+    """
+    Explicit user-initiated unsubscribe confirm endpoint.
+    Consumes token, deactivates user, and revokes pending deliveries upon intentional user POST.
+    Rejects query-string tokens.
+    """
+    if "token" in request.query_params:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token must be passed in JSON body, not query string."
+        )
+
     client_ip = get_client_ip(request)
     check_rate_limit(
         request=request,
@@ -198,7 +232,70 @@ def unsubscribe(
         window_seconds=60
     )
 
-    # 1. Early input validation
+    fingerprint = get_token_fingerprint(payload.token)
+    user_repo, token_repo = repos
+
+    token_hash = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
+    token_row = token_repo.get_valid_token(token_hash, "UNSUBSCRIBE")
+
+    if not token_row:
+        logger.warning(f"Unsubscribe confirm failed: token not found or already consumed (fingerprint: {fingerprint}).")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired unsubscribe link."
+        )
+
+    user_repo.set_unsubscribed(token_row["user_id"])
+    token_repo.mark_token_used(token_row["id"])
+    logger.info(f"User {token_row['user_id']} unsubscribed successfully (fingerprint: {fingerprint}).")
+
+    return {
+        "status": "success",
+        "message": "Successfully unsubscribed from VIT TPO alerts."
+    }
+
+
+@router.get("/unsubscribe")
+def unsubscribe_legacy_get(
+    request: Request,
+    token: str = Query(..., description="One-time unsubscribe token")
+):
+    """
+    Legacy unsubscribe GET link redirector.
+    Harmless, non-mutating 303 redirect to the SPA unsubscribe view with URL fragment.
+    Does NOT validate, consume, or deactivate user.
+    """
+    client_ip = get_client_ip(request)
+    check_rate_limit(
+        request=request,
+        key=f"unsub:ip:{client_ip}",
+        max_requests=getattr(settings, "RATE_LIMIT_UNSUBSCRIBE_PER_IP", 30),
+        window_seconds=60
+    )
+
+    return RedirectResponse(
+        url=f"/unsubscribe#token={token}",
+        status_code=status.HTTP_303_SEE_OTHER
+    )
+
+
+@router.post("/unsubscribe", response_class=HTMLResponse)
+def unsubscribe_legacy_post(
+    request: Request,
+    token: str = Query(..., description="One-time unsubscribe token"),
+    repos = Depends(get_db_repos)
+):
+    """
+    Legacy direct POST unsubscribe endpoint preserved for backward compatibility.
+    """
+    client_ip = get_client_ip(request)
+    check_rate_limit(
+        request=request,
+        key=f"unsub:ip:{client_ip}",
+        max_requests=getattr(settings, "RATE_LIMIT_UNSUBSCRIBE_PER_IP", 30),
+        window_seconds=60
+    )
+
     if not is_valid_token_format(token):
         logger.warning("Unsubscribe rejected: malformed token format.")
         return spa_response(
@@ -219,14 +316,90 @@ def unsubscribe(
             fallback_text="<h2>Invalid or Expired Unsubscribe Link</h2><p>This unsubscribe link is invalid or has already been used.</p>"
         )
 
-    # Immediately unsubscribe user and cancel pending deliveries
     user_repo.set_unsubscribed(token_row["user_id"])
     token_repo.mark_token_used(token_row["id"])
-    logger.info(f"User {token_row['user_id']} unsubscribed successfully (fingerprint: {fingerprint}).")
+    logger.info(f"User {token_row['user_id']} unsubscribed successfully via legacy POST (fingerprint: {fingerprint}).")
 
     return spa_response(
         status_code=status.HTTP_200_OK,
         fallback_text="<h2>Unsubscribed Successfully</h2><p>You have been unsubscribed from VIT TPO email alerts. Any pending notifications have been cancelled.</p>"
+    )
+
+
+@router.post("/unsubscribe/one-click")
+async def unsubscribe_one_click(
+    request: Request,
+    token: str = Query(..., description="One-click unsubscribe action token"),
+    repos = Depends(get_db_repos)
+):
+    """
+    RFC 8058 One-Click Unsubscribe endpoint.
+    Accepts List-Unsubscribe=One-Click via application/x-www-form-urlencoded or multipart/form-data.
+    Requires no user session or authentication. Does not redirect.
+    """
+    body_bytes = await request.body()
+    body_str = body_bytes.decode("utf-8", errors="replace").strip()
+
+    valid_one_click = False
+    if "list-unsubscribe=one-click" in body_str.lower():
+        valid_one_click = True
+    else:
+        try:
+            from urllib.parse import parse_qs
+            form = parse_qs(body_str)
+            for k, vals in form.items():
+                if k.lower() == "list-unsubscribe" and any(v.lower() == "one-click" for v in vals):
+                    valid_one_click = True
+                    break
+        except Exception:
+            pass
+
+    if not valid_one_click:
+        logger.warning("RFC 8058 rejection: missing or invalid List-Unsubscribe=One-Click body.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing or invalid List-Unsubscribe=One-Click body."
+        )
+
+    if not is_valid_token_format(token):
+        logger.warning("RFC 8058 rejection: malformed token format.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired unsubscribe link."
+        )
+
+    fingerprint = get_token_fingerprint(token)
+    user_repo, token_repo = repos
+
+    token_hash = hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
+    token_row = token_repo.get_valid_token(token_hash, "UNSUBSCRIBE")
+
+    if not token_row:
+        logger.warning(f"RFC 8058 unsubscribe failed: token not found or already consumed (fingerprint: {fingerprint}).")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired unsubscribe link."
+        )
+
+    user_repo.set_unsubscribed(token_row["user_id"])
+    token_repo.mark_token_used(token_row["id"])
+    logger.info(f"User {token_row['user_id']} unsubscribed via RFC 8058 one-click (fingerprint: {fingerprint}).")
+
+    return {
+        "status": "success",
+        "message": "Successfully unsubscribed via RFC 8058 one-click."
+    }
+
+
+@router.get("/unsubscribe/one-click")
+def unsubscribe_one_click_get():
+    """
+    RFC 8058 explicitly prohibits GET mutation.
+    Returns 405 Method Not Allowed with zero mutation.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+        detail="Method Not Allowed"
     )
 
 

@@ -1,54 +1,53 @@
 import { useState } from 'react'
 import { motion } from 'framer-motion'
-import { CheckCircle2, AlertCircle, Loader2, ArrowRight } from 'lucide-react'
+import { CheckCircle2, AlertCircle, Loader2, ArrowRight, Mail } from 'lucide-react'
+import { api } from '../lib/api'
 
 interface VerifyPageProps {
   token: string
   navigate: (path: string) => void
 }
 
-type VerifyState = 'verifying' | 'success' | 'error'
+type VerifyState = 'confirming' | 'loading' | 'success' | 'error'
 
 export function VerifyPage({ token, navigate }: VerifyPageProps) {
-  const [initial] = useState(() => {
-    const params = new URLSearchParams(window.location.search)
-    const status = params.get('status')
-    const msg = params.get('message') || params.get('detail')
-
-    if (!token && !status) {
-      return {
-        state: 'error' as VerifyState,
-        message: 'INVALID VERIFICATION LINK',
-        detail: 'The verification token is missing. Please use the link directly from your email.',
-      }
+  const [state, setState] = useState<VerifyState>(() => {
+    if (!token) {
+      // Check if URL search has legacy status
+      const params = new URLSearchParams(window.location.search)
+      const status = params.get('status')
+      if (status === 'success') return 'success'
+      return 'error'
     }
-
-    if (status === 'error' || window.location.pathname.includes('error')) {
-      return {
-        state: 'error' as VerifyState,
-        message: 'VERIFICATION FAILED',
-        detail: msg || 'The link may have expired or already been used. Please sign up again.',
-      }
-    }
-
-    if (status === 'success' || window.location.pathname.includes('success')) {
-      return {
-        state: 'success' as VerifyState,
-        message: msg || 'Your subscription is active. You will now receive verified TPO opportunity alerts.',
-        detail: '',
-      }
-    }
-
-    return {
-      state: 'success' as VerifyState,
-      message: 'Your email has been verified. You will receive alerts for matching TPO opportunities.',
-      detail: '',
-    }
+    return 'confirming'
   })
 
-  const [state] = useState<VerifyState>(initial.state)
-  const [message] = useState(initial.message)
-  const [detail] = useState(initial.detail)
+  const [message, setMessage] = useState(() => {
+    if (!token) {
+      const params = new URLSearchParams(window.location.search)
+      const msg = params.get('message') || params.get('detail')
+      return msg || 'The verification token is missing. Please use the link directly from your email.'
+    }
+    return ''
+  })
+
+  async function handleVerify() {
+    if (!token) {
+      setState('error')
+      setMessage('The verification token is missing. Please use the link directly from your email.')
+      return
+    }
+
+    setState('loading')
+    const res = await api.verifyConfirm(token)
+    if (res.ok) {
+      setState('success')
+      setMessage(res.data?.message || 'Your email has been verified. You will receive alerts for matching TPO opportunities.')
+    } else {
+      setState('error')
+      setMessage(res.error || 'The link may have expired or already been used. Please sign up again.')
+    }
+  }
 
   return (
     <div className="min-h-screen bg-background text-foreground flex items-center justify-center px-4 relative overflow-hidden">
@@ -62,7 +61,41 @@ export function VerifyPage({ token, navigate }: VerifyPageProps) {
           transition={{ duration: 0.4 }}
           className="card bg-surface-1 border border-line-strong p-8 sm:p-10 text-center rounded-xl shadow-[0_20px_50px_rgba(0,0,0,0.85)]"
         >
-          {state === 'verifying' && (
+          {state === 'confirming' && (
+            <>
+              <div className="w-16 h-16 rounded-full bg-accent/10 border border-accent/30 flex items-center justify-center mx-auto mb-5 text-accent">
+                <Mail className="h-8 w-8" />
+              </div>
+              <span className="text-[10px] font-mono tracking-[0.2em] text-accent uppercase block mb-1">
+                EMAIL VERIFICATION
+              </span>
+              <h1 className="font-display text-2xl uppercase text-foreground tracking-wide">
+                ACTIVATE TPO ALERTS
+              </h1>
+              <p className="mt-3 text-sm text-muted font-light max-w-sm mx-auto font-sans leading-relaxed">
+                Click below to verify your email address and activate your placement and internship notifications.
+              </p>
+              <div className="mt-8 flex flex-col gap-3">
+                <button
+                  type="button"
+                  onClick={handleVerify}
+                  className="btn-primary w-full text-xs tracking-widest justify-center py-3.5"
+                >
+                  Verify my email
+                  <ArrowRight className="h-3.5 w-3.5 ml-1" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate('/')}
+                  className="btn-secondary w-full text-xs tracking-widest justify-center py-3.5"
+                >
+                  CANCEL
+                </button>
+              </div>
+            </>
+          )}
+
+          {state === 'loading' && (
             <>
               <Loader2 className="h-12 w-12 text-accent animate-spin mx-auto mb-5" />
               <h1 className="font-display text-2xl uppercase tracking-wide text-foreground">
@@ -91,7 +124,7 @@ export function VerifyPage({ token, navigate }: VerifyPageProps) {
                 EMAIL VERIFIED
               </h1>
               <p className="mt-3 text-sm text-muted font-light max-w-sm mx-auto font-sans leading-relaxed">
-                {message}
+                {message || 'Your email has been verified. You will receive alerts for matching TPO opportunities.'}
               </p>
               <div className="mt-8 flex flex-col gap-3">
                 <button
@@ -122,10 +155,10 @@ export function VerifyPage({ token, navigate }: VerifyPageProps) {
                 TOKEN VERIFICATION FAILED
               </span>
               <h1 className="font-display text-2xl uppercase text-foreground tracking-wide">
-                {message}
+                VERIFICATION FAILED
               </h1>
               <p className="mt-3 text-sm text-muted font-light max-w-sm mx-auto font-sans">
-                {detail}
+                {message}
               </p>
               <button
                 type="button"

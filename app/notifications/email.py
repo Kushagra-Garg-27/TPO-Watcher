@@ -2,7 +2,7 @@ import smtplib
 import logging
 from email.message import EmailMessage
 from datetime import datetime, timezone, timedelta
-from typing import List
+from typing import List, Optional
 from app.config import settings
 from app.tpo.models import CompanyRecord
 from app.notifications.base import NotificationProvider
@@ -15,7 +15,7 @@ class EmailNotificationProvider(NotificationProvider):
     def _send_email(self, subject: str, html_content: str) -> bool:
         return self._send_email_to(settings.EMAIL_TO, subject, html_content)
 
-    def _send_email_to(self, to_email: str, subject: str, html_content: str) -> bool:
+    def _send_email_to(self, to_email: str, subject: str, html_content: str, extra_headers: Optional[dict] = None) -> bool:
         if not settings.SMTP_HOST or not settings.SMTP_USERNAME or not to_email:
             logger.warning("Email configuration or recipient missing. Skipping email notification.")
             return False
@@ -27,6 +27,10 @@ class EmailNotificationProvider(NotificationProvider):
         
         msg.set_content("Please enable HTML to view this email.")
         msg.add_alternative(html_content, subtype='html')
+
+        if extra_headers:
+            for k, v in extra_headers.items():
+                msg[k] = v
 
         try:
             with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:

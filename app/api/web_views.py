@@ -81,6 +81,11 @@ def preferences_page():
     return spa_response()
 
 
+@router.get("/preferences/confirm", response_class=HTMLResponse)
+def preferences_confirm_page():
+    return spa_response()
+
+
 @router.get("/verify", response_class=HTMLResponse)
 def verify_page():
     return spa_response()

@@ -201,8 +201,14 @@ class DeliveryWorker:
                 unsub_token = self._generate_token(user_id, "UNSUBSCRIBE", timedelta(days=30))
                 pref_token = self._generate_token(user_id, "MANAGE_PREFS", timedelta(minutes=15))
 
-                unsub_url = f"{base_url}/api/v1/unsubscribe?token={unsub_token}"
-                pref_url = f"{base_url}/api/v1/preferences/request?token={pref_token}"
+                unsub_url = f"{base_url}/unsubscribe#token={unsub_token}"
+                pref_url = f"{base_url}/preferences/confirm#token={pref_token}"
+                one_click_url = f"{base_url}/api/v1/unsubscribe/one-click?token={unsub_token}"
+
+                extra_headers = {
+                    "List-Unsubscribe": f"<{one_click_url}>",
+                    "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"
+                }
 
                 html_content = self._format_opportunity_email(
                     company_record=company,
@@ -217,10 +223,10 @@ class DeliveryWorker:
                 # Send email directly to the student's email address
                 success = False
                 if hasattr(self.notifier, "_send_email_to"):
-                    success = self.notifier._send_email_to(user_email, subject, html_content)
+                    success = self.notifier._send_email_to(user_email, subject, html_content, extra_headers=extra_headers)
                 else:
                     # Use fallback helper if method doesn't exist
-                    success = self._send_smtp_email(user_email, subject, html_content)
+                    success = self._send_smtp_email(user_email, subject, html_content, extra_headers=extra_headers)
 
                 if success:
                     self.delivery_repo.mark_sent(delivery_id)
@@ -239,7 +245,7 @@ class DeliveryWorker:
 
         return delivered_count
 
-    def _send_smtp_email(self, to_email: str, subject: str, html_content: str) -> bool:
+    def _send_smtp_email(self, to_email: str, subject: str, html_content: str, extra_headers: Optional[dict] = None) -> bool:
         """Fallback direct SMTP sender using settings."""
         import smtplib
         from email.message import EmailMessage
@@ -254,6 +260,10 @@ class DeliveryWorker:
         msg['To'] = to_email
         msg.set_content("Please enable HTML to view this email.")
         msg.add_alternative(html_content, subtype='html')
+
+        if extra_headers:
+            for k, v in extra_headers.items():
+                msg[k] = v
 
         try:
             with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
