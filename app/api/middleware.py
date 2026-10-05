@@ -74,9 +74,20 @@ class SecurityHeadersMiddleware:
                 headers.setdefault("cross-origin-opener-policy", "same-origin")
                 headers.setdefault("content-security-policy-report-only", self.csp_report_only)
 
-                # Cache-Control: no-store on sensitive auth/pref/unsub routes and SPA shells
+                # Cache-Control policy:
+                # 1. Sensitive auth/pref/unsub routes and SPA shells: MUST use no-store
                 if any(path == prefix or path.startswith(prefix + "/") or path.startswith(prefix + "?") for prefix in NO_STORE_PREFIXES):
-                    headers.setdefault("cache-control", "no-store")
+                    headers["cache-control"] = "no-store"
+                # 2. Ordinary SPA shells (HTML responses for non-asset, non-api routes): no-cache, must-revalidate
+                elif (
+                    not path.startswith("/api/")
+                    and not path.startswith("/assets/")
+                    and not path.startswith("/docs")
+                    and path not in ("/openapi.json", "/redoc", "/health")
+                ):
+                    content_type = headers.get("content-type", "")
+                    if "text/html" in content_type:
+                        headers.setdefault("cache-control", "no-cache, must-revalidate")
 
             await send(message)
 

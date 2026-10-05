@@ -56,7 +56,30 @@ def test_security_headers_on_root_spa_shell():
     res = client.get("/")
     assert res.status_code == 200
     assert_required_security_headers(res.headers)
-    assert res.headers.get("cache-control") != "no-store"
+    assert res.headers.get("cache-control") == "no-cache, must-revalidate"
+
+
+def test_cache_control_spa_shell_policy():
+    client = TestClient(app)
+
+    # 1. Ordinary SPA shell routes must return no-cache, must-revalidate
+    for path in ["/", "/signup", "/unknown-spa-client-route"]:
+        res = client.get(path)
+        assert res.status_code == 200
+        assert res.headers.get("cache-control") == "no-cache, must-revalidate", f"Failed on {path}"
+
+    # 2. Sensitive / token / account SPA shells must remain no-store
+    for path in ["/verify", "/unsubscribe", "/preferences"]:
+        res = client.get(path)
+        assert res.status_code == 200
+        assert res.headers.get("cache-control") == "no-store", f"Failed on {path}"
+
+    # 3. Hashed assets and static files must not have their cache policy overwritten
+    for asset_path in ["/favicon.svg", "/assets/index-BdLrdtJB.css"]:
+        res = client.get(asset_path)
+        assert res.status_code == 200
+        assert res.headers.get("cache-control") != "no-cache, must-revalidate", f"Failed on {asset_path}"
+        assert res.headers.get("cache-control") != "no-store", f"Failed on {asset_path}"
 
 
 def test_security_headers_on_api_opportunities():

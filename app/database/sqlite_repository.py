@@ -161,15 +161,102 @@ class SQLiteTokenRepository(SQLiteBaseRepository):
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def mark_token_used(self, token_id: int) -> None:
+    def mark_token_used(self, token_id: int) -> bool:
         now = datetime.now(timezone.utc).isoformat()
         with self._get_conn() as conn:
-            conn.execute("""
+            cursor = conn.execute("""
                 UPDATE action_tokens 
                 SET used_at = ? 
-                WHERE id = ?
+                WHERE id = ? AND used_at IS NULL
             """, (now, token_id))
             conn.commit()
+            return cursor.rowcount == 1
+
+    def claim_action_token(
+        self, 
+        token_hash: str, 
+        token_type: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Atomically claims a single-use action token if valid, unexpired, and unused.
+        Returns the token record dictionary if successfully claimed, or None if already used, expired, or invalid.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_conn() as conn:
+            cursor = conn.execute("""
+                UPDATE action_tokens 
+                SET used_at = ? 
+                WHERE token_hash = ? 
+                  AND token_type = ? 
+                  AND used_at IS NULL 
+                  AND expires_at > ?
+                RETURNING id, user_id, token_hash, token_type, expires_at, created_at, used_at
+            """, (now, token_hash, token_type, now))
+            row = cursor.fetchone()
+            conn.commit()
+            return dict(row) if row else None
+
+    def claim_and_verify(self, token_hash: str) -> Optional[int]:
+        """
+        Atomically claims a valid SIGNUP_VERIFY token and marks the corresponding user verified
+        within a single SQLite transaction.
+        Returns user_id on success, or None if the token was already consumed, expired, or invalid.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_conn() as conn:
+            cursor = conn.execute("""
+                UPDATE action_tokens 
+                SET used_at = ? 
+                WHERE token_hash = ? 
+                  AND token_type = 'SIGNUP_VERIFY' 
+                  AND used_at IS NULL 
+                  AND expires_at > ?
+                RETURNING id, user_id
+            """, (now, token_hash, now))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            user_id = row["user_id"]
+            conn.execute("""
+                UPDATE users 
+                SET is_verified = 1, verified_at = ?, updated_at = ?
+                WHERE id = ?
+            """, (now, now, user_id))
+            conn.commit()
+            return user_id
+
+    def claim_and_unsubscribe(self, token_hash: str) -> Optional[int]:
+        """
+        Atomically claims a valid UNSUBSCRIBE token, deactivates the user, and cancels
+        pending/processing deliveries within a single SQLite transaction.
+        Returns user_id on success, or None if the token was already consumed, expired, or invalid.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_conn() as conn:
+            cursor = conn.execute("""
+                UPDATE action_tokens 
+                SET used_at = ? 
+                WHERE token_hash = ? 
+                  AND token_type = 'UNSUBSCRIBE' 
+                  AND used_at IS NULL 
+                  AND expires_at > ?
+                RETURNING id, user_id
+            """, (now, token_hash, now))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            user_id = row["user_id"]
+            conn.execute("""
+                UPDATE users 
+                SET is_active = 0, updated_at = ?
+                WHERE id = ?
+            """, (now, user_id))
+            conn.execute("""
+                DELETE FROM notification_deliveries 
+                WHERE user_id = ? AND status IN ('PENDING', 'PROCESSING')
+            """, (user_id,))
+            conn.commit()
+            return user_id
 
     def invalidate_user_tokens(self, user_id: int, token_type: str) -> None:
         now = datetime.now(timezone.utc).isoformat()

@@ -106,7 +106,7 @@ def exchange_magic_link_confirm(
     user_repo, token_repo = repos
 
     token_hash = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
-    token_row = token_repo.get_valid_token(token_hash, "MANAGE_PREFS")
+    token_row = token_repo.claim_action_token(token_hash, "MANAGE_PREFS")
 
     if not token_row:
         logger.warning(f"Magic link confirm failed: invalid or expired token (fingerprint: {fingerprint}).")
@@ -123,9 +123,6 @@ def exchange_magic_link_confirm(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User account is deactivated or not found."
         )
-
-    # Mark token used immediately (single-use exchange)
-    token_repo.mark_token_used(token_row["id"])
 
     # Supersede/invalidate any older unused preference tokens for this user
     token_repo.invalidate_user_tokens(user_id, "MANAGE_PREFS")

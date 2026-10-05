@@ -164,18 +164,16 @@ def verify_email_confirm(
     user_repo, token_repo = repos
 
     token_hash = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
-    token_row = token_repo.get_valid_token(token_hash, "SIGNUP_VERIFY")
+    user_id = token_repo.claim_and_verify(token_hash)
 
-    if not token_row:
+    if not user_id:
         logger.warning(f"Verification confirm failed: token not found or already consumed (fingerprint: {fingerprint}).")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired verification link."
         )
 
-    user_repo.set_verified(token_row["user_id"])
-    token_repo.mark_token_used(token_row["id"])
-    logger.info(f"Email verified successfully for user {token_row['user_id']} (fingerprint: {fingerprint}).")
+    logger.info(f"Email verified successfully for user {user_id} (fingerprint: {fingerprint}).")
 
     return {
         "status": "success",
@@ -236,18 +234,16 @@ def unsubscribe_confirm(
     user_repo, token_repo = repos
 
     token_hash = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
-    token_row = token_repo.get_valid_token(token_hash, "UNSUBSCRIBE")
+    user_id = token_repo.claim_and_unsubscribe(token_hash)
 
-    if not token_row:
+    if not user_id:
         logger.warning(f"Unsubscribe confirm failed: token not found or already consumed (fingerprint: {fingerprint}).")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired unsubscribe link."
         )
 
-    user_repo.set_unsubscribed(token_row["user_id"])
-    token_repo.mark_token_used(token_row["id"])
-    logger.info(f"User {token_row['user_id']} unsubscribed successfully (fingerprint: {fingerprint}).")
+    logger.info(f"User {user_id} unsubscribed successfully (fingerprint: {fingerprint}).")
 
     return {
         "status": "success",
@@ -307,18 +303,16 @@ def unsubscribe_legacy_post(
     user_repo, token_repo = repos
 
     token_hash = hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
-    token_row = token_repo.get_valid_token(token_hash, "UNSUBSCRIBE")
+    user_id = token_repo.claim_and_unsubscribe(token_hash)
 
-    if not token_row:
+    if not user_id:
         logger.warning(f"Unsubscribe failed: token not found or already consumed (fingerprint: {fingerprint}).")
         return spa_response(
             status_code=status.HTTP_400_BAD_REQUEST,
             fallback_text="<h2>Invalid or Expired Unsubscribe Link</h2><p>This unsubscribe link is invalid or has already been used.</p>"
         )
 
-    user_repo.set_unsubscribed(token_row["user_id"])
-    token_repo.mark_token_used(token_row["id"])
-    logger.info(f"User {token_row['user_id']} unsubscribed successfully via legacy POST (fingerprint: {fingerprint}).")
+    logger.info(f"User {user_id} unsubscribed successfully via legacy POST (fingerprint: {fingerprint}).")
 
     return spa_response(
         status_code=status.HTTP_200_OK,
@@ -372,18 +366,16 @@ async def unsubscribe_one_click(
     user_repo, token_repo = repos
 
     token_hash = hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
-    token_row = token_repo.get_valid_token(token_hash, "UNSUBSCRIBE")
+    user_id = token_repo.claim_and_unsubscribe(token_hash)
 
-    if not token_row:
+    if not user_id:
         logger.warning(f"RFC 8058 unsubscribe failed: token not found or already consumed (fingerprint: {fingerprint}).")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired unsubscribe link."
         )
 
-    user_repo.set_unsubscribed(token_row["user_id"])
-    token_repo.mark_token_used(token_row["id"])
-    logger.info(f"User {token_row['user_id']} unsubscribed via RFC 8058 one-click (fingerprint: {fingerprint}).")
+    logger.info(f"User {user_id} unsubscribed via RFC 8058 one-click (fingerprint: {fingerprint}).")
 
     return {
         "status": "success",

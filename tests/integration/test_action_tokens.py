@@ -702,3 +702,207 @@ def test_rfc_8058_email_headers_present_in_worker_dispatches(action_client):
     unsub_header_val = extra_headers["List-Unsubscribe"]
     assert unsub_header_val.startswith(f"<{settings.BASE_URL}/api/v1/unsubscribe/one-click?token=")
     assert unsub_header_val.endswith(">")
+
+
+# =====================================================================
+# 18-21: CONCURRENCY RACE REGRESSION TESTS
+# =====================================================================
+
+def test_18_concurrency_verify_confirm(action_client):
+    """
+    Ensure exactly 1 of 10 concurrent verify/confirm requests claims the token.
+    All 9 others fail with HTTP 400.
+    Token has exactly 1 used_at timestamp and user is verified.
+    """
+    import threading
+
+    user_id = action_client.user_repo.create_user("conc_verify@vit.edu", 2028, "VIT_CE")
+    raw_token = secrets.token_urlsafe(32)
+    thash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    action_client.token_repo.create_token(
+        user_id=user_id,
+        token_hash=thash,
+        token_type="SIGNUP_VERIFY",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=24)
+    )
+
+    num_threads = 10
+    barrier = threading.Barrier(num_threads)
+    responses = []
+
+    def worker():
+        barrier.wait()
+        res = action_client.post("/api/v1/auth/verify/confirm", json={"token": raw_token})
+        responses.append(res)
+
+    threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    status_codes = [r.status_code for r in responses]
+    assert status_codes.count(200) == 1
+    assert status_codes.count(400) == 9
+
+    # Verify user state is verified
+    user = action_client.user_repo.get_by_id(user_id)
+    assert user["is_verified"] == 1
+    assert user["verified_at"] is not None
+
+    # Verify token row in DB has used_at set
+    with sqlite3.connect(action_client.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM action_tokens WHERE token_hash = ?", (thash,)).fetchone()
+        assert row["used_at"] is not None
+
+
+def test_19_concurrency_unsubscribe_confirm(action_client):
+    """
+    Ensure exactly 1 of 10 concurrent unsubscribe/confirm requests claims the token.
+    All 9 others fail with HTTP 400.
+    User is marked inactive and pending deliveries cancelled in one transaction.
+    """
+    import threading
+
+    user_id = action_client.user_repo.create_user("conc_unsub@vit.edu", 2028, "VIT_CE")
+    action_client.user_repo.set_verified(user_id)
+    with sqlite3.connect(action_client.db_path) as conn:
+        conn.execute("INSERT OR IGNORE INTO companies (id, company, raw_data_json) VALUES ('2001', 'Conc Corp', '{}')")
+        conn.commit()
+
+    action_client.delivery_repo.enqueue_deliveries([{
+        "user_id": user_id,
+        "company_id": "2001",
+        "notification_type": "NEW"
+    }])
+
+    raw_token = secrets.token_urlsafe(32)
+    thash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    action_client.token_repo.create_token(
+        user_id=user_id,
+        token_hash=thash,
+        token_type="UNSUBSCRIBE",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=30)
+    )
+
+    num_threads = 10
+    barrier = threading.Barrier(num_threads)
+    responses = []
+
+    def worker():
+        barrier.wait()
+        res = action_client.post("/api/v1/unsubscribe/confirm", json={"token": raw_token})
+        responses.append(res)
+
+    threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    status_codes = [r.status_code for r in responses]
+    assert status_codes.count(200) == 1
+    assert status_codes.count(400) == 9
+
+    # User must be inactive
+    user = action_client.user_repo.get_by_id(user_id)
+    assert user["is_active"] == 0
+
+    # Deliveries cancelled
+    stats = action_client.delivery_repo.get_delivery_stats()
+    assert stats["PENDING"] == 0
+
+
+def test_20_concurrency_preferences_confirm(action_client):
+    """
+    Ensure exactly 1 of 10 concurrent preferences/confirm requests claims the token.
+    All 9 others fail with HTTP 400.
+    Exactly 1 response receives the tpo_session Set-Cookie.
+    """
+    import threading
+
+    user_id = action_client.user_repo.create_user("conc_prefs@vit.edu", 2028, "VIT_CE")
+    action_client.user_repo.set_verified(user_id)
+
+    raw_token = secrets.token_urlsafe(32)
+    thash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    action_client.token_repo.create_token(
+        user_id=user_id,
+        token_hash=thash,
+        token_type="MANAGE_PREFS",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15)
+    )
+
+    num_threads = 10
+    barrier = threading.Barrier(num_threads)
+    responses = []
+
+    def worker():
+        # Independent TestClient per thread to ensure cookie headers are captured per request
+        thread_client = TestClient(app)
+        barrier.wait()
+        res = thread_client.post("/api/v1/preferences/confirm", json={"token": raw_token})
+        responses.append(res)
+
+    threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    status_codes = [r.status_code for r in responses]
+    assert status_codes.count(200) == 1
+    assert status_codes.count(400) == 9
+
+    # Exactly 1 response contains tpo_session cookie
+    cookies_present = [r for r in responses if "tpo_session" in r.cookies]
+    assert len(cookies_present) == 1
+    assert cookies_present[0].status_code == 200
+
+
+def test_21_concurrency_rfc_8058_one_click(action_client):
+    """
+    Ensure exactly 1 of 10 concurrent RFC 8058 one-click unsubscribe requests claims the token.
+    All 9 others fail with HTTP 400.
+    User is marked inactive.
+    """
+    import threading
+
+    user_id = action_client.user_repo.create_user("conc_rfc8058@vit.edu", 2028, "VIT_CE")
+    action_client.user_repo.set_verified(user_id)
+
+    raw_token = secrets.token_urlsafe(32)
+    thash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    action_client.token_repo.create_token(
+        user_id=user_id,
+        token_hash=thash,
+        token_type="UNSUBSCRIBE",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=30)
+    )
+
+    num_threads = 10
+    barrier = threading.Barrier(num_threads)
+    responses = []
+
+    def worker():
+        barrier.wait()
+        res = action_client.post(
+            f"/api/v1/unsubscribe/one-click?token={raw_token}",
+            data="List-Unsubscribe=One-Click",
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
+        )
+        responses.append(res)
+
+    threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    status_codes = [r.status_code for r in responses]
+    assert status_codes.count(200) == 1
+    assert status_codes.count(400) == 9
+
+    user = action_client.user_repo.get_by_id(user_id)
+    assert user["is_active"] == 0
