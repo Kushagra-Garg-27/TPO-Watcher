@@ -16,8 +16,6 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'OVERVIEW', href: '#overview' },
   { label: 'HOW IT WORKS', href: '#how-it-works' },
   { label: 'LIVE DETECTIONS', href: '#detections' },
-  { label: 'CAPABILITIES', href: '#capabilities' },
-  { label: 'TECH STORY', href: '#technology' },
   { label: 'PREFERENCES', href: '/preferences', isPage: true },
 ]
 

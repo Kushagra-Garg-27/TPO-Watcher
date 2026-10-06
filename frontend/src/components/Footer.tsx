@@ -31,6 +31,11 @@ export function Footer({ navigate }: FooterProps) {
                   </a>
                 </li>
                 <li>
+                  <a href="#signup" className="hover:text-foreground transition-colors flex items-center gap-1">
+                    SUBSCRIBE <ArrowUpRight className="h-3 w-3" />
+                  </a>
+                </li>
+                <li>
                   <a href="#how-it-works" className="hover:text-foreground transition-colors flex items-center gap-1">
                     PIPELINE <ArrowUpRight className="h-3 w-3" />
                   </a>
@@ -38,11 +43,6 @@ export function Footer({ navigate }: FooterProps) {
                 <li>
                   <a href="#detections" className="hover:text-foreground transition-colors flex items-center gap-1">
                     ARCHIVE <ArrowUpRight className="h-3 w-3" />
-                  </a>
-                </li>
-                <li>
-                  <a href="#capabilities" className="hover:text-foreground transition-colors flex items-center gap-1">
-                    CAPABILITIES <ArrowUpRight className="h-3 w-3" />
                   </a>
                 </li>
               </ul>

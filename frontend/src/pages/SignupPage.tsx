@@ -7,8 +7,6 @@ import {
 import { HeroSection } from '../components/sections/HeroSection'
 import { MonitoringPipeline } from '../components/sections/MonitoringPipeline'
 import { RecentDetections } from '../components/sections/RecentDetections'
-import { CoreCapabilities } from '../components/sections/CoreCapabilities'
-import { TechnicalStory } from '../components/sections/TechnicalStory'
 import { Marquee } from '../components/motion/Marquee'
 import { FadeUp } from '../components/motion/FadeUp'
 import { BranchSelector } from '../components/BranchSelector'
@@ -199,26 +197,14 @@ export function SignupPage({ navigate }: SignupPageProps) {
         </div>
       </section>
 
-      {/* ── 04: HOW IT WORKS / MONITORING PIPELINE ──────────────────── */}
-      <MonitoringPipeline />
-
-      {/* ── 05: VERIFIED OPPORTUNITY ARCHIVE ────────────────────────── */}
-      <RecentDetections />
-
-      {/* ── 06: CORE CAPABILITIES ───────────────────────────────────── */}
-      <CoreCapabilities />
-
-      {/* ── 07: TECHNICAL STORY ─────────────────────────────────────── */}
-      <TechnicalStory />
-
-      {/* ── 08: SUBSCRIPTION / REGISTRATION AREA ───────────────────── */}
+      {/* ── 04: SUBSCRIPTION / REGISTRATION AREA ───────────────────── */}
       <section id="signup" className="py-24 sm:py-32 relative border-t border-line">
         <div className="section-container">
           <div className="max-w-2xl mx-auto">
             <FadeUp delay={0.1}>
               <div className="text-center mb-12">
                 <span className="text-[11px] font-mono tracking-[0.25em] text-accent uppercase block mb-3 font-semibold">
-                  05 // SUBSCRIBE FOR ALERTS
+                  SUBSCRIBE FOR ALERTS
                 </span>
                 <h2 className="font-display text-4xl sm:text-6xl uppercase text-foreground leading-[0.92] tracking-tight">
                   ACTIVATE YOUR
@@ -425,7 +411,13 @@ export function SignupPage({ navigate }: SignupPageProps) {
         </div>
       </section>
 
-      {/* ── 09: CINEMATIC FOOTER ────────────────────────────────────── */}
+      {/* ── 05: HOW IT WORKS / WATCHER ENGINE ───────────────────────── */}
+      <MonitoringPipeline />
+
+      {/* ── 06: VERIFIED OPPORTUNITY ARCHIVE ────────────────────────── */}
+      <RecentDetections />
+
+      {/* ── 07: CINEMATIC FOOTER ────────────────────────────────────── */}
       <Footer navigate={navigate} />
     </div>
   )
