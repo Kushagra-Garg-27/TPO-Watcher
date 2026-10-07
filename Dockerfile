@@ -16,3 +16,12 @@ ENV PYTHONUNBUFFERED=1
 
 # Run the watcher
 CMD ["python", "-m", "app.main"]
+
+# Source revision provenance metadata (placed at end to protect build cache)
+ARG GIT_COMMIT=unknown
+ARG BUILD_DATE=unknown
+
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.source="https://github.com/Kushagra-Garg-27/TPO-Watcher"
+
