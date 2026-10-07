@@ -146,7 +146,8 @@ class PlacementWatcher:
                     logger.info(f"Dispatched {delivered_subs} student subscriber notifications.")
                 
                 logger.info("Check iteration complete.")
-                break
+                self.record_heartbeat_success()
+                return True
                 
             except AuthenticationError as e:
                 logger.warning(f"Authentication failure detected during check: {e}")
@@ -163,9 +164,30 @@ class PlacementWatcher:
                     continue
                 else:
                     logger.error("Authentication recovery failed after re-authentication attempt.")
+                    self.record_heartbeat_failure()
+                    return False
             except Exception as e:
                 logger.error(f"Error during check iteration: {e}")
-                break
+                self.record_heartbeat_failure()
+                return False
+        return False
+
+    def record_heartbeat_success(self):
+        """Records UTC timestamp of successful scheduled watcher execution."""
+        now_utc = datetime.now(timezone.utc).isoformat()
+        self.db.set_system_state("last_successful_watcher_run", now_utc)
+        self.db.set_system_state("consecutive_watcher_failures", "0")
+
+    def record_heartbeat_failure(self):
+        """Records failure timestamp and increments failure count."""
+        now_utc = datetime.now(timezone.utc).isoformat()
+        self.db.set_system_state("last_failed_watcher_run", now_utc)
+        curr = self.db.get_system_state("consecutive_watcher_failures")
+        try:
+            count = int(curr or 0) + 1
+        except ValueError:
+            count = 1
+        self.db.set_system_state("consecutive_watcher_failures", str(count))
 
     async def prune_stale_tokens_job(self) -> int:
         """

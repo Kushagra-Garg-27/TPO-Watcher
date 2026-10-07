@@ -262,6 +262,22 @@ class DatabaseRepository:
             """, (now,))
             conn.commit()
 
+    def get_system_state(self, key: str) -> Optional[str]:
+        with self._get_conn() as conn:
+            cursor = conn.execute("SELECT value FROM system_state WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return row["value"] if row else None
+
+    def set_system_state(self, key: str, value: str) -> None:
+        with self._get_conn() as conn:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute("""
+                INSERT INTO system_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """, (key, value, now))
+            conn.commit()
+
     def add_pending_notification(self, company_id: str, notif_type: str, changes: List[str]):
         with self._get_conn() as conn:
             now = datetime.now(timezone.utc).isoformat()
