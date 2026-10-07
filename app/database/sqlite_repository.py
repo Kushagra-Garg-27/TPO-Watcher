@@ -268,6 +268,32 @@ class SQLiteTokenRepository(SQLiteBaseRepository):
             """, (now, user_id, token_type))
             conn.commit()
 
+    def prune_stale_tokens(self, retention_days: int = 30) -> int:
+        """
+        Prunes action tokens exceeding the retention period:
+        - Used tokens whose used_at <= cutoff
+        - Expired unused tokens whose expires_at <= cutoff
+        Uses a single short transaction and bound parameters.
+        Logs only aggregate count; never logs token hashes or identities.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=retention_days)
+        ).isoformat(timespec="microseconds")
+        with self._get_conn() as conn:
+            cursor = conn.execute("""
+                DELETE FROM action_tokens 
+                WHERE (used_at IS NOT NULL AND used_at <= ?)
+                   OR (used_at IS NULL AND expires_at <= ?)
+            """, (cutoff, cutoff))
+            deleted_count = cursor.rowcount
+            conn.commit()
+            logger.info(
+                "Pruned %d stale action tokens older than retention cutoff (retention_days=%d).",
+                deleted_count,
+                retention_days
+            )
+            return deleted_count
+
 class SQLiteDeliveryRepository(SQLiteBaseRepository):
     def enqueue_deliveries(self, deliveries: List[Dict[str, Any]]) -> int:
         if not deliveries:

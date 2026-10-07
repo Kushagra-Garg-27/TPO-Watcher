@@ -40,6 +40,7 @@ async def main():
             server = uvicorn.Server(config)
             await asyncio.gather(
                 watcher.run_forever(),
+                watcher.run_pruning_loop(),
                 server.serve()
             )
     except KeyboardInterrupt:

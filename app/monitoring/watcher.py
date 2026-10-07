@@ -32,6 +32,10 @@ class PlacementWatcher:
             check_times=settings.get_check_times_list(),
             timezone_name=settings.TIMEZONE
         )
+        self.prune_scheduler = TimezoneScheduler(
+            check_times=["01:00"],
+            timezone_name=settings.TIMEZONE
+        )
         
         self.target_programs = settings.get_target_programs_list()
         self.fanout = FanoutEngine(self.db.users, self.db.deliveries)
@@ -162,6 +166,46 @@ class PlacementWatcher:
             except Exception as e:
                 logger.error(f"Error during check iteration: {e}")
                 break
+
+    async def prune_stale_tokens_job(self) -> int:
+        """
+        Runs daily action-token retention pruning.
+        Completely isolated: exceptions are logged and never impact watcher ingestion.
+        """
+        try:
+            count = self.db.tokens.prune_stale_tokens()
+            return count
+        except Exception as e:
+            logger.error("Action-token retention pruning encountered an error: %s", e)
+            return 0
+
+    async def run_pruning_loop(self):
+        """
+        Schedules and executes token retention pruning daily at 01:00 IST.
+        Kept strictly separate from watcher ingestion schedules.
+        """
+        logger.info(f"Token retention pruning scheduler active (01:00 {self.prune_scheduler.timezone_name}).")
+        while True:
+            try:
+                next_prune = self.prune_scheduler.get_next_run()
+                now = datetime.now(self.prune_scheduler.tz)
+                wait_seconds = (next_prune - now).total_seconds()
+
+                logger.info(f"Next token retention pruning scheduled for {next_prune.strftime('%Y-%m-%d %H:%M:%S')} IST")
+
+                if wait_seconds > 0:
+                    await asyncio.sleep(wait_seconds)
+
+                logger.info("Starting daily action-token retention pruning...")
+                await self.prune_stale_tokens_job()
+                logger.info("Daily action-token retention pruning completed.")
+
+            except asyncio.CancelledError:
+                logger.info("Pruning schedule loop stopped.")
+                break
+            except Exception as e:
+                logger.error(f"Unexpected error in pruning scheduling loop: {e}")
+                await asyncio.sleep(60)
 
     async def run_forever(self):
         logger.info("VIT TPO Placement Watcher service started.")
