@@ -19,12 +19,19 @@ Version-controlled templates for automated host-level database backups to Amazon
 
 ## Installation Procedure
 
-1. **Create non-secret configuration file**
+1. **Create configuration files & permissions**
+   The backup service runs under user `ec2-user`. Configuration files must be readable by `ec2-user` while isolated from other unprivileged users (`ec2-user:ec2-user`, file mode `0600`, directory mode `0700`):
+
    ```bash
    sudo mkdir -p /etc/tpo-watcher
+   sudo chown ec2-user:ec2-user /etc/tpo-watcher
+   sudo chmod 0700 /etc/tpo-watcher
+
+   # Non-secret configuration (S3 bucket)
    sudo tee /etc/tpo-watcher/backup.env > /dev/null << 'EOF'
    BACKUP_S3_BUCKET=tpo-watcher-backups-ap-south-1
    EOF
+   sudo chown ec2-user:ec2-user /etc/tpo-watcher/backup.env
    sudo chmod 0600 /etc/tpo-watcher/backup.env
    ```
 
@@ -33,6 +40,7 @@ Version-controlled templates for automated host-level database backups to Amazon
    sudo tee /etc/tpo-watcher/backup-healthcheck.conf > /dev/null << 'EOF'
    HEALTHCHECK_BACKUP_URL=https://hc-ping.com/YOUR-UUID-HERE
    EOF
+   sudo chown ec2-user:ec2-user /etc/tpo-watcher/backup-healthcheck.conf
    sudo chmod 0600 /etc/tpo-watcher/backup-healthcheck.conf
    ```
 
@@ -44,12 +52,22 @@ Version-controlled templates for automated host-level database backups to Amazon
    sudo chmod 0644 /etc/systemd/system/tpo-backup.timer
    ```
 
-3. **Reload systemd daemon**
+3. **Pre-install schedule validation**
+   Before enabling the timer, validate the schedule expression on the production host:
+   ```bash
+   systemd-analyze calendar '*-*-* 02:00:00 Asia/Kolkata'
+   ```
+   *Note: If the host systemd version lacks named IANA timezone support, edit `/etc/systemd/system/tpo-backup.timer` to use the UTC equivalent (`*-*-* 20:30:00 UTC`) and validate:*
+   ```bash
+   systemd-analyze calendar '*-*-* 20:30:00 UTC'
+   ```
+
+4. **Reload systemd daemon**
    ```bash
    sudo systemctl daemon-reload
    ```
 
-4. **Enable and start the timer**
+5. **Enable and start the timer**
    ```bash
    sudo systemctl enable --now tpo-backup.timer
    ```
@@ -65,9 +83,9 @@ sudo systemctl status tpo-backup.timer
 
 ### 2. List Active Timers
 ```bash
-systemctl list-timers tpo-backup.timer
+systemctl list-timers --all
 ```
-Expected output shows `NEXT` scheduled run at 02:00:00 IST (or 20:30:00 UTC).
+Expected output shows `tpo-backup.timer` with `NEXT` scheduled run at 02:00:00 IST (or 20:30:00 UTC).
 
 ### 3. Safe Manual One-Off Execution
 To test the backup pipeline without waiting for the timer:

@@ -30,7 +30,7 @@ def run_cmd(args: list, check: bool = True) -> subprocess.CompletedProcess:
 
 def load_checkin_url(config_path: Optional[str]) -> Optional[str]:
     """
-    Loads healthcheck check-in URL from a root-only host configuration file.
+    Loads healthcheck check-in URL from a service-restricted host configuration file.
     Does NOT place the URL on process command line or environment.
     """
     if not config_path or not os.path.exists(config_path):
@@ -42,13 +42,15 @@ def load_checkin_url(config_path: Optional[str]) -> Optional[str]:
                 return None
             if content.startswith("{"):
                 data = json.loads(content)
-                return data.get("healthcheck_url") or data.get("HEALTHCHECK_BACKUP_URL")
+                url = data.get("healthcheck_url") or data.get("HEALTHCHECK_BACKUP_URL")
+                return url.strip() if url and url.strip() else None
             for line in content.splitlines():
                 line = line.strip()
                 if line.startswith("HEALTHCHECK_BACKUP_URL="):
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    return val.strip() if val and val.strip() else None
                 if line.startswith("http://") or line.startswith("https://"):
-                    return line
+                    return line.strip() if line.strip() else None
             return None
     except Exception as e:
         logger.warning("Could not read healthcheck config file: %s", type(e).__name__)
@@ -199,7 +201,7 @@ def main():
     parser.add_argument("--container", default="tpo-watcher", help="Docker container name")
     parser.add_argument("--prefix", default="backups", help="S3 object prefix")
     parser.add_argument("--config-file", help="Path to non-secret configuration file")
-    parser.add_argument("--checkin-config", help="Path to root-only check-in configuration file")
+    parser.add_argument("--checkin-config", help="Path to service-restricted check-in configuration file")
 
     args = parser.parse_args()
 

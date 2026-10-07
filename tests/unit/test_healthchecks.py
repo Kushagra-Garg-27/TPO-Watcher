@@ -189,6 +189,25 @@ class TestBackupHealthchecks:
         assert load_checkin_url("/nonexistent/file/path") is None
         assert load_checkin_url(None) is None
 
+    def test_load_checkin_url_empty_file(self, tmp_path):
+        cfg = tmp_path / "empty.conf"
+        cfg.write_text("")
+        assert load_checkin_url(str(cfg)) is None
+
+    def test_load_checkin_url_empty_values(self, tmp_path):
+        cfg_env = tmp_path / "empty_env.conf"
+        cfg_env.write_text("HEALTHCHECK_BACKUP_URL=\n")
+        assert load_checkin_url(str(cfg_env)) is None
+
+        cfg_json = tmp_path / "empty_json.conf"
+        cfg_json.write_text(json.dumps({"healthcheck_url": ""}))
+        assert load_checkin_url(str(cfg_json)) is None
+
+    def test_load_checkin_url_malformed_does_not_raise(self, tmp_path):
+        cfg = tmp_path / "corrupt.json"
+        cfg.write_text("{malformed: json")
+        assert load_checkin_url(str(cfg)) is None
+
     def test_backup_success_ping(self, tmp_path):
         dummy_file = tmp_path / "watcher_test.sqlite"
         dummy_file.write_bytes(b"SQLite format 3\x00test")
