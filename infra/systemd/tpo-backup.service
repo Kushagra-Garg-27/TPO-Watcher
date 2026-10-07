@@ -1,0 +1,20 @@
+[Unit]
+Description=TPO-Watcher SQLite Verified Daily Backup & S3 Upload
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=ec2-user
+WorkingDirectory=/home/ec2-user/TPO-Watcher
+EnvironmentFile=-/etc/tpo-watcher/backup.env
+ExecStart=/usr/bin/python3 scripts/backup_sqlite.py --bucket ${BACKUP_S3_BUCKET} --container tpo-watcher --prefix backups
+StandardOutput=journal
+StandardError=journal
+Restart=no
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true

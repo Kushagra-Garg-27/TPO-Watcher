@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily schedule for TPO-Watcher SQLite verified backup
+PartOf=tpo-backup.service
+
+[Timer]
+# Run daily at 02:00 Asia/Kolkata (equivalent to 20:30 UTC of previous calendar day)
+OnCalendar=*-*-* 02:00:00 Asia/Kolkata
+# Note: On systemd versions without named IANA timezone support in OnCalendar, use UTC equivalent:
+# OnCalendar=*-*-* 20:30:00 UTC
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
