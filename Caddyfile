@@ -1,0 +1,3 @@
+tpowatcher.duckdns.org {
+    reverse_proxy watcher:8000
+}

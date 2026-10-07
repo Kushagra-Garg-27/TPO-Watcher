@@ -3,6 +3,8 @@ services:
     build: .
     container_name: tpo-watcher
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
     env_file:
       - .env
     volumes:
@@ -12,5 +14,21 @@ services:
       - DB_PATH=/app/data/watcher.sqlite
       - STATE_FILE=/app/data/playwright_state.json
 
+  caddy:
+    image: caddy:2
+    container_name: tpo-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - watcher
+
 volumes:
   watcher_data:
+  caddy_data:
+  caddy_config:
