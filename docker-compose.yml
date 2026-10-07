@@ -13,6 +13,11 @@ services:
       # Persistent paths in mounted volume
       - DB_PATH=/app/data/watcher.sqlite
       - STATE_FILE=/app/data/playwright_state.json
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   caddy:
     image: caddy:2
@@ -27,6 +32,11 @@ services:
       - caddy_config:/config
     depends_on:
       - watcher
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   watcher_data:
