@@ -11,6 +11,7 @@ from app.database.sqlite_repository import (
     SQLiteTokenRepository,
     SQLiteDeliveryRepository
 )
+from app.database.repository import DatabaseRepository
 from app.api.routes_auth import get_db_repos
 from app.api.email_service import get_email_service
 
@@ -41,24 +42,19 @@ class FakeEmailService:
 @pytest.fixture
 def test_client(tmp_path, monkeypatch):
     db_path = str(tmp_path / "test_api.sqlite")
-    # Initialize basic companies and system state tables
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("CREATE TABLE companies (id TEXT PRIMARY KEY, company TEXT, raw_data_json TEXT)")
-        conn.execute("CREATE TABLE system_state (key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMP)")
-        conn.execute("INSERT INTO system_state (key, value) VALUES ('baseline_initialized', 'true')")
-        conn.commit()
+    # Canonical application database repository initialization
+    db_repo = DatabaseRepository(db_path)
+    db_repo.set_baseline_initialized()
 
-    run_migrations(db_path)
-
-    # Override db repos dependency
-    user_repo = SQLiteUserRepository(db_path)
-    token_repo = SQLiteTokenRepository(db_path)
-    delivery_repo = SQLiteDeliveryRepository(db_path)
+    user_repo = db_repo.users
+    token_repo = db_repo.tokens
+    delivery_repo = db_repo.deliveries
 
     # In-memory fake email service sink
     fake_email_service = FakeEmailService()
 
     monkeypatch.setattr("app.database.repository.DB_PATH", db_path)
+    monkeypatch.setattr("app.health.server.DB_PATH", db_path)
     app.dependency_overrides[get_db_repos] = lambda: (user_repo, token_repo)
     app.dependency_overrides[get_email_service] = lambda: fake_email_service
 
