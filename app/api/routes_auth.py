@@ -13,7 +13,7 @@ from app.subscribers.canonical import CanonicalBranch
 from app.api.email_service import EmailService, get_email_service
 from app.api.rate_limiter import check_rate_limit, get_client_ip
 from app.api.security_utils import is_valid_token_format, get_token_fingerprint
-from app.api.session import revoke_session_token
+from app.api.session import revoke_session_token, perform_logout
 from app.api.web_views import spa_response
 
 logger = logging.getLogger(__name__)
@@ -401,18 +401,8 @@ def logout(
     request: Request
 ):
     """
-    Explicitly invalidates the session:
+    Canonical session logout endpoint:
     1. Revokes the session token server-side.
     2. Clears the HttpOnly session cookie on the client.
     """
-    tpo_session = request.cookies.get("tpo_session")
-    if tpo_session:
-        revoke_session_token(tpo_session)
-        logger.info("Session revoked upon logout.")
-    response.delete_cookie(
-        key="tpo_session",
-        path="/",
-        httponly=True,
-        samesite="lax"
-    )
-    return {"status": "success", "message": "Successfully logged out."}
+    return perform_logout(request, response)

@@ -15,6 +15,7 @@ from app.api.session import create_session_token, verify_session_token, revoke_s
 from app.api.email_service import EmailService, get_email_service
 from app.api.rate_limiter import check_rate_limit, get_client_ip
 from app.api.security_utils import is_valid_token_format, get_token_fingerprint
+from app.api.session import revoke_session_token, perform_logout
 from app.api.web_views import spa_response
 
 logger = logging.getLogger(__name__)
@@ -295,15 +296,7 @@ def logout_preferences(
     request: Request
 ):
     """
-    Logs out the current session and clears the session cookie.
+    Temporary compatibility route for session logout.
+    Delegates to shared perform_logout handler.
     """
-    tpo_session = request.cookies.get("tpo_session")
-    if tpo_session:
-        revoke_session_token(tpo_session)
-    response.delete_cookie(
-        key="tpo_session",
-        path="/",
-        httponly=True,
-        samesite="lax"
-    )
-    return {"status": "success", "message": "Successfully logged out."}
+    return perform_logout(request, response)

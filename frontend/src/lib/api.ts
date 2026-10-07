@@ -128,4 +128,10 @@ export const api = {
   async getOpportunities(): Promise<ApiResult<Opportunity[]>> {
     return request('/api/v1/opportunities')
   },
+
+  async logout(): Promise<ApiResult<{ message: string; status: string }>> {
+    return request('/api/v1/auth/logout', {
+      method: 'POST',
+    })
+  },
 }

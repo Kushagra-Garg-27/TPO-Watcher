@@ -107,3 +107,31 @@ def reset_session_revocations() -> None:
     """Clears all session revocations. Primarily used for testing."""
     with _REVOCATION_LOCK:
         _REVOKED_SESSIONS.clear()
+
+
+def perform_logout(request, response) -> dict:
+    """
+    Consolidated session logout handler:
+    1. Revokes server-side session token if present.
+    2. Clears client-side session cookie with matching security attributes.
+    """
+    from app.config import settings
+
+    tpo_session = request.cookies.get("tpo_session")
+    if tpo_session:
+        revoke_session_token(tpo_session)
+        logger.info("Session revoked upon logout.")
+    is_secure = bool(
+        settings.COOKIE_SECURE
+        or request.url.scheme == "https"
+        or request.headers.get("x-forwarded-proto") == "https"
+    )
+    response.delete_cookie(
+        key="tpo_session",
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=is_secure
+    )
+    return {"status": "success", "message": "Successfully logged out."}
+

@@ -99,6 +99,12 @@ export function PreferencesPage({ navigate }: PreferencesPageProps) {
     if (saveState === 'saved') setSaveState('idle')
   }
 
+  async function handleSignOut() {
+    await api.logout()
+    setPreferences(null)
+    setPageState('request-link')
+  }
+
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col justify-between pt-24">
       <div className="section-container py-12 flex-1 w-full max-w-2xl mx-auto">
@@ -266,9 +272,18 @@ export function PreferencesPage({ navigate }: PreferencesPageProps) {
               <div className="card bg-surface-1 border border-line p-5 rounded-xl mb-6">
                 <div className="flex items-center justify-between border-b border-line pb-3 mb-3">
                   <span className="text-[10px] font-mono tracking-widest text-muted uppercase">SUBSCRIBER IDENTITY</span>
-                  <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
-                    ● ACTIVE
-                  </span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
+                      ● ACTIVE
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleSignOut}
+                      className="text-[10px] font-mono text-muted hover:text-foreground tracking-wider uppercase transition-colors underline cursor-pointer"
+                    >
+                      SIGN OUT
+                    </button>
+                  </div>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs font-mono">
                   <div>
