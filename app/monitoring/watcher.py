@@ -14,6 +14,7 @@ from app.notifications.email import EmailNotificationProvider
 from app.tpo.models import CompanyRecord
 from app.subscribers.fanout import FanoutEngine
 from app.subscribers.worker import DeliveryWorker
+from app.monitoring.checkin import send_healthcheck_ping
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,7 @@ class PlacementWatcher:
                 
                 logger.info("Check iteration complete.")
                 self.record_heartbeat_success()
+                send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=True)
                 return True
                 
             except AuthenticationError as e:
@@ -165,11 +167,15 @@ class PlacementWatcher:
                 else:
                     logger.error("Authentication recovery failed after re-authentication attempt.")
                     self.record_heartbeat_failure()
+                    send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
                     return False
             except Exception as e:
                 logger.error(f"Error during check iteration: {e}")
                 self.record_heartbeat_failure()
+                send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
                 return False
+        self.record_heartbeat_failure()
+        send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
         return False
 
     def record_heartbeat_success(self):

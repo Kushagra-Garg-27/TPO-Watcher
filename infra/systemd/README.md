@@ -28,6 +28,14 @@ Version-controlled templates for automated host-level database backups to Amazon
    sudo chmod 0600 /etc/tpo-watcher/backup.env
    ```
 
+   *(Optional) Configure Healthchecks.io check-in ping:*
+   ```bash
+   sudo tee /etc/tpo-watcher/backup-healthcheck.conf > /dev/null << 'EOF'
+   HEALTHCHECK_BACKUP_URL=https://hc-ping.com/YOUR-UUID-HERE
+   EOF
+   sudo chmod 0600 /etc/tpo-watcher/backup-healthcheck.conf
+   ```
+
 2. **Copy systemd units**
    ```bash
    sudo cp infra/systemd/tpo-backup.service /etc/systemd/system/

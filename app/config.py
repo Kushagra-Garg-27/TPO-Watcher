@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     RATE_LIMIT_UNSUBSCRIBE_PER_IP: int = 30
     RATE_LIMIT_PREF_UPDATE_PER_IP: int = 30
 
+    # Optional External Heartbeat Check-in URL
+    HEALTHCHECK_WATCHER_URL: Optional[str] = None
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     def get_target_programs_list(self) -> List[str]:
