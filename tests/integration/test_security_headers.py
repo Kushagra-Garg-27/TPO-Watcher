@@ -1,6 +1,5 @@
 import socket
 import threading
-import time
 import urllib.request
 import pytest
 from fastapi.testclient import TestClient
@@ -197,39 +196,61 @@ def test_uvicorn_live_server_header_absent():
     """Verify Server header is omitted over the wire via temporary localhost uvicorn."""
     test_app = create_app()
 
-    # Find a free localhost port
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+    ready = threading.Event()
+    server_errors = []
 
-    config = uvicorn.Config(
-        app=test_app,
-        host="127.0.0.1",
-        port=port,
-        log_level="error",
-        access_log=False,
-        server_header=False,
-    )
-    server = uvicorn.Server(config)
+    class ReadyServer(uvicorn.Server):
+        async def startup(self, sockets=None):
+            await super().startup(sockets=sockets)
+            if self.started:
+                ready.set()
 
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
+    # Keep the exact owned socket alive through startup, HTTP, and shutdown.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(128)
+        listener.setblocking(False)
+        port = listener.getsockname()[1]
+        config = uvicorn.Config(
+            app=test_app,
+            host="127.0.0.1",
+            port=port,
+            log_level="error",
+            access_log=False,
+            server_header=False,
+            timeout_graceful_shutdown=2,
+        )
+        server = ReadyServer(config)
 
-    # Wait for server to start listening
-    url = f"http://127.0.0.1:{port}/api/v1/opportunities"
-    for _ in range(30):
+        def run_server():
+            try:
+                server.run(sockets=[listener])
+            except BaseException as exc:
+                server_errors.append(exc)
+            finally:
+                ready.set()  # Also wake the bounded wait if startup fails.
+
+        thread = threading.Thread(target=run_server, daemon=True)
+        thread.start()
         try:
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=1.0) as resp:
+            assert ready.wait(timeout=5.0), "Localhost uvicorn startup timed out"
+            if server_errors:
+                raise server_errors[0]
+            assert server.started and thread.is_alive(), "Localhost uvicorn failed to start"
+            # This request uses only the owned endpoint, without ambient proxies.
+            url = f"http://127.0.0.1:{port}/api/v1/opportunities"
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(url, timeout=2.0) as resp:
+                assert resp.status == 200
                 headers = dict(resp.headers)
-                # Verify Server header is absent or does not contain uvicorn
                 server_hdr = headers.get("Server", headers.get("server"))
                 assert server_hdr is None or "uvicorn" not in server_hdr.lower()
-                break
-        except Exception:
-            time.sleep(0.1)
-    else:
-        pytest.fail("Localhost uvicorn server failed to respond in time")
-
-    server.should_exit = True
-    thread.join(timeout=2.0)
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5.0)
+            if thread.is_alive():
+                server.force_exit = True
+                thread.join(timeout=2.0)
+            assert not thread.is_alive(), "Localhost uvicorn thread failed to stop"
+        if server_errors:
+            raise server_errors[0]
