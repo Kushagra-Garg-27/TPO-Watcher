@@ -5,8 +5,11 @@ from pathlib import Path
 import smtplib
 import socket
 import sqlite3
+import _sqlite3
 import subprocess
+import sys
 import urllib.request
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -45,14 +48,19 @@ def test_unmocked_urllib_is_denied_before_dns():
 
 @pytest.mark.parametrize("address", [("192.0.2.1", 443), ("127.0.0.1", 8000)])
 def test_external_and_arbitrary_localhost_socket_denied(address):
+    native = Mock()
+    guarded = isolation._guard_socket_call(native, "connect")
     with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
-        with socket.socket() as sock:
-            sock.connect(address)
+        guarded(object(), address)
+    native.assert_not_called()
 
 
 def test_external_dns_is_denied():
+    native = Mock()
+    guarded = isolation._guard_resolver(native, "getaddrinfo")
     with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
-        socket.getaddrinfo("external.invalid", 443)
+        guarded("external.invalid", 443)
+    native.assert_not_called()
 
 
 @pytest.mark.parametrize("database", [
@@ -69,7 +77,7 @@ def test_persistent_database_is_denied_before_open(database):
 def test_sqlite_attach_cannot_escape_temp_root(tmp_path):
     with sqlite3.connect(str(tmp_path / "synthetic.sqlite")) as conn:
         with isolation.expected_violation(), pytest.raises(sqlite3.DatabaseError):
-            conn.execute("ATTACH DATABASE ? AS forbidden", (str(isolation.REPOSITORY / "never-open.sqlite"),))
+            conn.execute("ATTACH DATABASE ? AS forbidden", (":memory:",))
 
 
 @pytest.mark.parametrize("relative", [".env", ".env.production", "playwright_state.json", ".auth/never-read.json"])
@@ -189,3 +197,315 @@ def test_temp_files_can_be_changed_and_deleted(tmp_path):
     assert destination.read_text() == "fictional"
     destination.unlink()
     assert not destination.exists()
+
+
+# These initial regressions are safe against the old implementation too:
+# native SQLite can touch only memory or the fixture cwd, and audit calls below
+# are pure Python calls with no downstream OS operation.
+@pytest.mark.parametrize("constructor", [sqlite3.connect, sqlite3.dbapi2.connect])
+def test_sqlite_alias_attach_relative_is_denied(constructor):
+    conn = constructor(":memory:")
+    try:
+        with isolation.expected_violation(), pytest.raises(sqlite3.DatabaseError):
+            conn.execute("ATTACH DATABASE 'synthetic-relative.sqlite' AS forbidden")
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("constructor", [_sqlite3.connect, sqlite3.Connection, sqlite3.dbapi2.Connection])
+def test_raw_sqlite_constructors_are_denied_before_open(constructor):
+    conn = None
+    try:
+        with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+            conn = constructor(":memory:")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+@pytest.mark.parametrize("event,args", [
+    ("socket.gethostbyname", ("synthetic.invalid",)),
+    ("socket.gethostbyaddr", ("192.0.2.1",)),
+    ("socket.getnameinfo", (("192.0.2.1", 443), 0)),
+    ("socket.sendmsg", (object(), ("192.0.2.1", 443))),
+])
+def test_resolver_and_sendmsg_audit_events_fail_closed(event, args):
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        isolation._audit(event, args)
+
+
+@pytest.mark.parametrize("event,args", [
+    ("os.chmod", ("synthetic.txt", 0o600, 123)),
+    ("os.utime", ("synthetic.txt", None, None, 123)),
+    ("os.symlink", ("source.txt", "destination.txt", 123)),
+    ("shutil.rmtree", ("synthetic-directory", 123)),
+])
+def test_descriptor_audit_arguments_are_not_ignored(event, args, monkeypatch):
+    def reject_descriptor(path, dir_fd=None):
+        if dir_fd == 123:
+            isolation._deny("synthetic descriptor rejected")
+        return path
+    monkeypatch.setattr(isolation, "_mutation_path", reject_descriptor)
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        isolation._audit(event, args)
+
+
+@pytest.mark.parametrize("constructor", [sqlite3.connect, sqlite3.dbapi2.connect])
+@pytest.mark.parametrize("file_backed", [False, True])
+def test_guarded_sqlite_aliases_allow_synthetic_sql_and_literal_attach(constructor, file_backed, tmp_path):
+    database = str(tmp_path / "owned.sqlite") if file_backed else ":memory:"
+    target = str(tmp_path / "attached.sqlite").replace("'", "''")
+    conn = constructor(database)
+    try:
+        conn.execute("CREATE TABLE main.synthetic (id INTEGER)")
+        conn.execute("ATTACH DATABASE '" + target + "' AS owned")
+        conn.execute("CREATE TABLE owned.synthetic (id INTEGER)")
+        conn.execute("DETACH DATABASE owned")
+        assert conn.execute("SELECT 42").fetchone() == (42,)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("mode", ["ro", "rw", "rwc"])
+def test_guarded_sqlite_preserves_supported_owned_uris(mode, tmp_path):
+    target = tmp_path / "owned-uri.sqlite"
+    sqlite3.connect(str(target)).close()
+    sqlite3.connect("file:" + target.as_posix() + "?mode=" + mode, uri=True).close()
+
+
+def test_sqlite_literal_unsupported_uri_attach_is_denied(tmp_path):
+    # Even absent an authorizer this URI refers only to this synthetic fixture.
+    target = ("file:" + (tmp_path / "synthetic.sqlite").as_posix() + "?cache=private").replace("'", "''")
+    conn = sqlite3.connect(":memory:")
+    try:
+        with isolation.expected_violation("unsupported SQLite URI"), pytest.raises(sqlite3.DatabaseError):
+            conn.execute("ATTACH DATABASE '" + target + "' AS forbidden")
+        assert isolation._violations == []
+    finally:
+        conn.close()
+
+
+def test_sqlite_parameter_attach_records_unknown_target_denial():
+    conn = sqlite3.connect(":memory:")
+    try:
+        with isolation.expected_violation("unresolved SQLite ATTACH target disabled"):
+            with pytest.raises(sqlite3.DatabaseError):
+                conn.execute("ATTACH DATABASE ? AS forbidden", (":memory:",))
+            assert isolation._violations[-1] == "unresolved SQLite ATTACH target disabled"
+    finally:
+        conn.close()
+
+
+def test_sqlite_reinitialization_is_denied_and_original_state_survives(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE synthetic (id INTEGER)")
+        with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+            sqlite3.Connection.__init__(conn, str(tmp_path / "synthetic-reinitialized.sqlite"))
+        assert conn.execute("SELECT count(*) FROM synthetic").fetchone() == (0,)
+        assert not (tmp_path / "synthetic-reinitialized.sqlite").exists()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("positional", [False, True])
+def test_sqlite_custom_factory_denied_before_inert_factory(positional):
+    factory = Mock()
+    args = (5.0, 0, "", True, factory) if positional else ()
+    kwargs = {} if positional else {"factory": factory}
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        sqlite3.connect(":memory:", *args, **kwargs)
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["construction", "authorizer"])
+def test_sqlite_permit_reset_and_unpublished_connection_closed(failure):
+    conn = Mock()
+    native = Mock(return_value=conn)
+    if failure == "construction":
+        native.side_effect = TypeError("synthetic construction failure")
+    else:
+        conn.set_authorizer.side_effect = TypeError("synthetic authorizer failure")
+    with pytest.raises(TypeError):
+        isolation._guard_sqlite_connect(native)(":memory:")
+    assert isolation._sqlite_construction.pending is False
+    assert conn.close.call_count == (failure == "authorizer")
+
+
+def test_sqlite_construction_permit_is_consumed_once_before_open():
+    conn = Mock()
+    def native(database):
+        isolation._audit("sqlite3.connect", (database,))
+        assert isolation._sqlite_construction.pending is False
+        with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+            isolation._audit("sqlite3.connect", (":memory:",))
+        return conn
+    assert isolation._guard_sqlite_connect(native)(":memory:") is conn
+    conn.set_authorizer.assert_called_once()
+    assert isolation._sqlite_construction.pending is False
+
+
+@pytest.mark.parametrize("operation", ["connect", "connect_ex", "sendto"])
+@pytest.mark.parametrize("address", [
+    ("synthetic.invalid", 443), ("192.0.2.1", 443), ("127.0.0.1", 8000),
+    (b"127.0.0.1", 8000), ("127.0.0.1", "http"), "synthetic-path",
+])
+def test_destinations_rejected_before_inert_native_call(operation, address):
+    native = Mock()
+    args = (b"synthetic", address) if operation == "sendto" else (address,)
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        isolation._guard_socket_call(native, operation)(object(), *args)
+    native.assert_not_called()
+
+
+@pytest.mark.parametrize("flags", [False, True])
+def test_both_sendto_forms_rejected_before_inert_delegate(flags):
+    native = Mock()
+    args = (b"synthetic", 0, ("synthetic.invalid", 443)) if flags else (b"synthetic", ("synthetic.invalid", 443))
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        isolation._guard_socket_call(native, "sendto")(object(), *args)
+    native.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr", "getnameinfo"])
+def test_all_resolvers_denied_before_inert_delegate_and_installed(operation):
+    native = Mock()
+    args = ("synthetic.invalid", 443) if operation == "getaddrinfo" else ("synthetic.invalid",)
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        isolation._guard_resolver(native, operation)(*args)
+    native.assert_not_called()
+    assert getattr(socket, operation).__isolation_guard__ == operation
+
+
+@pytest.mark.parametrize("address,live", [
+    (("::1", 12345), True), (("127.0.0.1", 12345), False),
+    (("127.0.0.1", 12345, 1, 0), True), (("127.0.0.1", True), True),
+])
+def test_owned_endpoint_requires_exact_live_literal_address(address, live, monkeypatch):
+    listener = Mock()
+    listener.fileno.return_value = 42 if live else -1
+    monkeypatch.setattr(isolation, "_loopback_test", True)
+    monkeypatch.setattr(isolation, "_listeners", {listener: ("127.0.0.1", 12345)})
+    native = Mock()
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        isolation._guard_socket_call(native, "connect")(object(), address)
+    native.assert_not_called()
+
+
+def test_owned_numeric_resolver_and_connection_forward_to_inert_delegates(monkeypatch):
+    listener = Mock()
+    listener.fileno.return_value = 42
+    monkeypatch.setattr(isolation, "_loopback_test", True)
+    monkeypatch.setattr(isolation, "_listeners", {listener: ("127.0.0.1", 12345)})
+    resolver = Mock(return_value=["synthetic"])
+    assert isolation._guard_resolver(resolver, "getaddrinfo")("127.0.0.1", 12345) == ["synthetic"]
+    resolver.assert_called_once_with("127.0.0.1", 12345, 0, 0, 0, socket.AI_NUMERICHOST | socket.AI_NUMERICSERV)
+    native = Mock(return_value=0)
+    sock = object()
+    assert isolation._guard_socket_call(native, "connect_ex")(sock, ("127.0.0.1", 12345)) == 0
+    native.assert_called_once_with(sock, ("127.0.0.1", 12345))
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        isolation._guard_resolver(resolver, "getaddrinfo")("127.0.0.1", 12345, flags=socket.AI_CANONNAME)
+    assert resolver.call_count == 1
+
+
+@pytest.mark.parametrize("args", [((),), ((), (), 0, None), ((), (), 0, ("192.0.2.1", 443))])
+def test_sendmsg_unconditionally_denied_before_inert_native(args):
+    native = Mock()
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        isolation._guard_socket_call(native, "sendmsg")(object(), *args)
+    native.assert_not_called()
+
+
+@pytest.mark.skipif(not hasattr(socket.socket, "sendmsg"), reason="Windows has no native sendmsg; Linux runtime outstanding")
+def test_native_sendmsg_method_has_installed_guard():
+    assert socket.socket.sendmsg.__isolation_guard__ == "sendmsg"
+    # A non-socket receiver cannot transmit even if the wrapper is removed:
+    # the native descriptor rejects its type before inspecting buffers/address.
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        socket.socket.sendmsg(object(), (), (), 0, ("192.0.2.1", 443))
+
+
+def test_socket_factory_bindings_and_raw_constructor_audit_denial():
+    assert socket.SocketType is socket.socket
+    for operation in ("connect", "connect_ex", "sendto"):
+        assert getattr(socket.socket, operation).__isolation_guard__ == operation
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        isolation._audit("socket.__new__", (object(), socket.AF_INET, socket.SOCK_STREAM, 0))
+    native = Mock()
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        isolation._guard_native_socketpair(native)(socket.AF_INET, socket.SOCK_STREAM, 0)
+    native.assert_not_called()
+
+
+@pytest.mark.parametrize("event,args", [
+    ("os.remove", ("synthetic.txt", 123)), ("os.rmdir", ("synthetic-dir", 123)),
+    ("os.mkdir", ("synthetic-dir", 0o700, 123)), ("os.chown", ("synthetic.txt", 1, 2, 123)),
+    ("os.rename", ("source", "dest", 123, -1)), ("os.link", ("source", "dest", -1, 123)),
+])
+def test_related_descriptor_audit_tuples_fail_closed(event, args, monkeypatch):
+    def reject_descriptor(path, dir_fd=None):
+        if dir_fd == 123:
+            isolation._deny("synthetic descriptor rejected")
+        return path
+    monkeypatch.setattr(isolation, "_mutation_path", reject_descriptor)
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        isolation._audit(event, args)
+
+
+def test_descriptor_open_resolves_owned_target_and_strips_descriptor(tmp_path):
+    native = Mock(return_value=17)
+    reader = Mock(return_value=str(tmp_path))
+    guarded = isolation._guard_os_open(native, readlink=reader, platform="linux")
+    assert guarded("synthetic.txt", os.O_WRONLY, 0o600, dir_fd=123) == 17
+    reader.assert_called_once_with("/proc/self/fd/123")
+    native.assert_called_once_with(tmp_path / "synthetic.txt", os.O_WRONLY, 0o600)
+    assert os.open.__isolation_guard__ == "os.open"
+
+
+@pytest.mark.parametrize("case", ["outside", "traversal", "missing", "relative", "invalid", "negative", "unsupported", "not-directory"])
+def test_descriptor_open_denial_has_inert_downstream_and_synthetic_descriptor(case, tmp_path):
+    native = Mock()
+    reader = Mock(return_value=str(tmp_path))
+    path, descriptor, platform = "synthetic.txt", 123, "linux"
+    if case == "outside":
+        reader.return_value = str(isolation.ROOT.parent / "synthetic-outside-directory")
+    elif case == "traversal":
+        path = os.path.relpath(isolation.ROOT.parent, tmp_path) + "/synthetic.txt"
+    elif case == "missing":
+        reader.side_effect = OSError("synthetic unavailable descriptor")
+    elif case == "relative":
+        reader.return_value = "pipe:[synthetic]"
+    elif case == "invalid":
+        descriptor = "synthetic"
+    elif case == "negative":
+        descriptor = -1
+    elif case == "unsupported":
+        platform = "win32"
+    elif case == "not-directory":
+        reader.return_value = str(tmp_path / "synthetic-missing-directory")
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        isolation._guard_os_open(native, readlink=reader, platform=platform)(path, os.O_WRONLY, dir_fd=descriptor)
+    native.assert_not_called()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux owned directory-descriptor runtime outstanding")
+def test_linux_owned_descriptor_operations_and_safe_cleanup(tmp_path):
+    import shutil
+    assert os.open in os.supports_dir_fd
+    assert shutil.rmtree.avoids_symlink_attacks
+    directory = tmp_path / "owned-directory"
+    directory.mkdir()
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        fd = os.open("synthetic.txt", os.O_CREAT | os.O_WRONLY, 0o600, dir_fd=descriptor)
+        os.close(fd)
+        os.chmod("synthetic.txt", 0o600, dir_fd=descriptor)
+        os.utime("synthetic.txt", dir_fd=descriptor)
+        os.unlink("synthetic.txt", dir_fd=descriptor)
+    finally:
+        os.close(descriptor)
+    nested = directory / "nested"
+    nested.mkdir()
+    (nested / "synthetic.txt").write_text("synthetic")
+    shutil.rmtree(directory)

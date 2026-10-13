@@ -11,6 +11,7 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import socket
+import _socket
 import sqlite3
 import sys
 import tempfile
@@ -29,6 +30,8 @@ _violations = []
 _loopback_test = False
 _listeners = {}
 _socketpair = threading.local()
+_sqlite_construction = threading.local()
+_SQLITE_CONNECTION = sqlite3.Connection
 
 
 def _deny(reason, prefix="TEST ISOLATION: "):
@@ -65,17 +68,41 @@ def disposable_path(path):
         return False
 
 
-def _mutation_path(path, dir_fd=None):
+def _mutation_path(path, dir_fd=None, *, readlink=None, platform=None):
     if dir_fd not in (-1, None):
         # Linux shutil.rmtree uses relative names and directory descriptors.
         # Resolve the directory itself, never trust the relative string alone.
-        if sys.platform != "linux":
+        if (sys.platform if platform is None else platform) != "linux":
             _deny("unsupported descriptor-relative filesystem mutation")
-        directory = Path(os.readlink("/proc/self/fd/" + str(dir_fd))).resolve()
-        if not disposable_path(directory):
+        if type(dir_fd) is not int or dir_fd < 0:
+            _deny("invalid filesystem directory descriptor")
+        try:
+            value = (os.readlink if readlink is None else readlink)("/proc/self/fd/" + str(dir_fd))
+            directory = Path(os.fsdecode(value))
+            if not directory.is_absolute():
+                _deny("unresolved filesystem directory descriptor")
+            directory = directory.resolve()
+        except (OSError, ValueError, TypeError):
+            _deny("unresolved filesystem directory descriptor")
+        if not disposable_path(directory) or not directory.is_dir():
             _deny("filesystem descriptor outside disposable test root")
         return directory / os.fsdecode(path)
     return path
+
+
+def _guard_os_open(native, *, readlink=None, platform=None):
+    def guarded_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is not None:
+            if type(dir_fd) is not int or dir_fd < 0:
+                _deny("invalid filesystem directory descriptor")
+            path = _mutation_path(path, dir_fd, readlink=readlink, platform=platform)
+            if not disposable_path(path):
+                _deny("descriptor-relative open outside disposable test root")
+        # Absolute lexical target preserves leaf symlink/O_NOFOLLOW semantics.
+        # Removing dir_fd also lets the ordinary open audit see the true target.
+        return native(path, flags, mode)
+    guarded_open.__isolation_guard__ = "os.open"
+    return guarded_open
 
 
 def _database_path(database):
@@ -117,24 +144,29 @@ def _audit(event, args):
         if writing and not inside and os.fsdecode(path) != os.devnull:
             _deny("file write outside disposable test root")
     elif event == "sqlite3.connect":
+        if not getattr(_sqlite_construction, "pending", False):
+            _deny("unguarded SQLite constructor disabled")
+        _sqlite_construction.pending = False  # One creation, consumed before open.
         _database_path(args[0])
     elif event in ("sqlite3.load_extension", "sqlite3.enable_load_extension"):
         _deny("SQLite extensions disabled")
-    elif event in ("os.remove", "os.rmdir", "os.mkdir", "os.chmod", "os.truncate", "os.utime"):
-        descriptor = args[-1] if event in ("os.remove", "os.rmdir", "os.mkdir") else None
+    elif event in ("os.remove", "os.rmdir", "os.mkdir", "os.chmod", "os.truncate", "os.utime", "os.chown"):
+        index = {"os.remove": 1, "os.rmdir": 1, "os.mkdir": 2,
+                 "os.chmod": 2, "os.utime": 3, "os.chown": 3}.get(event)
+        descriptor = args[index] if index is not None else None
         if not disposable_path(_mutation_path(args[0], descriptor)):
             _deny("filesystem mutation outside disposable test root")
     elif event in ("os.rename", "os.link", "os.symlink"):
+        descriptors = args[2:3] if event == "os.symlink" else args[2:]
+        if any(value not in (-1, None) for value in descriptors):
+            _deny("descriptor-relative rename disabled")
         source = args[0]
         if event == "os.symlink" and not Path(source).is_absolute():
             source = Path(args[1]).parent / source
         if not disposable_path(source) or not disposable_path(args[1]):
             _deny("rename outside disposable test root")
-        descriptors = args[3:] if event == "os.symlink" else args[2:]
-        if any(value not in (-1, None) for value in descriptors):
-            _deny("descriptor-relative rename disabled")
     elif event == "shutil.rmtree":
-        if not disposable_path(args[0]):
+        if not disposable_path(_mutation_path(args[0], args[1])):
             _deny("recursive delete outside disposable test root")
     elif event in ("subprocess.Popen", "os.system", "os.posix_spawn", "os.posix_spawnp"):
         _deny("subprocess/browser/CLI execution disabled")
@@ -142,16 +174,94 @@ def _audit(event, args):
         _check_connection(args[-1])
     elif event == "socket.getaddrinfo":
         _check_connection((args[0], args[1]))
+    elif event in ("socket.gethostbyname", "socket.gethostbyaddr", "socket.getnameinfo", "socket.sendmsg"):
+        _deny("unsupported native resolver/sendmsg disabled")
+    elif event == "socket.__new__":
+        if not isinstance(args[0], socket.socket):
+            _deny("unguarded socket constructor disabled")
+    elif event == "socket.bind":
+        _check_bind(args[1])
 
 
 def _check_connection(address):
-    if not isinstance(address, tuple) or len(address) < 2:
+    if not isinstance(address, tuple) or len(address) not in (2, 4):
         _deny("network connection disabled")
     host, port = address[:2]
+    if type(host) is not str or type(port) is not int or (len(address) == 4 and address[2:] != (0, 0)):
+        _deny("unsupported network address disabled")
     # No DNS lookup, arbitrary localhost service, proxy, or external network.
-    live_ports = {value[1] for sock, value in list(_listeners.items()) if _loopback_test or sock.fileno() >= 0}
-    if not ((_loopback_test or getattr(_socketpair, "active", False)) and host in ("127.0.0.1", "::1") and port in live_ports):
+    live_endpoints = {value[:2] for sock, value in list(_listeners.items()) if sock.fileno() >= 0}
+    if not ((_loopback_test or getattr(_socketpair, "active", False)) and host in ("127.0.0.1", "::1") and (host, port) in live_endpoints):
         _deny("unmocked network/DNS connection disabled")
+
+
+def _check_bind(address):
+    if not ((_loopback_test or getattr(_socketpair, "active", False))
+            and isinstance(address, tuple) and len(address) == 2
+            and address[0] in ("127.0.0.1", "::1") and type(address[1]) is int and address[1] == 0):
+        _deny("network listener disabled")
+
+
+def _guard_socket_call(native, operation):
+    def guarded(sock, *args, **kwargs):
+        if operation == "sendmsg":
+            _deny("unsupported native resolver/sendmsg disabled")
+        if kwargs or not args:
+            _deny("unsupported socket call form disabled")
+        _check_connection(args[-1])  # Both positional sendto forms end in address.
+        return native(sock, *args)
+    guarded.__isolation_guard__ = operation
+    return guarded
+
+
+def _guard_resolver(native, operation):
+    if operation == "getaddrinfo":
+        def guarded(host, port, family=0, type=0, proto=0, flags=0):
+            _check_connection((host, port))
+            if flags & socket.AI_CANONNAME:
+                _deny("resolver canonical-name lookup disabled")
+            return native(host, port, family, type, proto,
+                          flags | socket.AI_NUMERICHOST | socket.AI_NUMERICSERV)
+    else:
+        def guarded(*args, **kwargs):
+            _deny("unsupported native resolver/sendmsg disabled")
+    guarded.__isolation_guard__ = operation
+    return guarded
+
+
+def _guard_native_socketpair(native):
+    def guarded(family, type, proto):
+        if not (getattr(_socketpair, "active", False) and family == getattr(socket, "AF_UNIX", None)):
+            _deny("unguarded native socketpair disabled")
+        return native(family, type, proto)
+    return guarded
+
+
+def _guard_sqlite_connect(native):
+    def guarded_connect(database, *args, **kwargs):
+        database = os.fsdecode(database)
+        _database_path(database)
+        factory = args[4] if len(args) > 4 else kwargs.get("factory", _SQLITE_CONNECTION)
+        if factory is not _SQLITE_CONNECTION or ("factory" in kwargs and kwargs["factory"] is not _SQLITE_CONNECTION):
+            _deny("custom SQLite connection factory disabled")
+        _sqlite_construction.pending = True
+        try:
+            conn = native(database, *args, **kwargs)
+        finally:
+            _sqlite_construction.pending = False
+        def authorizer(action, arg1, arg2, db_name, trigger):
+            if action == sqlite3.SQLITE_ATTACH:
+                if arg1 is None:
+                    _deny("unresolved SQLite ATTACH target disabled")
+                _database_path(arg1)
+            return sqlite3.SQLITE_OK
+        try:
+            conn.set_authorizer(authorizer)
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+    return guarded_connect
 
 
 @contextmanager
@@ -216,23 +326,32 @@ def install():
     from pydantic_settings.sources import DotEnvSettingsSource
     DotEnvSettingsSource._read_env_files = lambda self: {}
 
-    original_connect = sqlite3.connect
-    def guarded_connect(database, *args, **kwargs):
-        _database_path(database)
-        conn = original_connect(database, *args, **kwargs)
-        def authorizer(action, arg1, arg2, db_name, trigger):
-            if action == sqlite3.SQLITE_ATTACH:
-                _database_path(arg1)
-            return sqlite3.SQLITE_OK
-        conn.set_authorizer(authorizer)
-        return conn
+    guarded_connect = _guard_sqlite_connect(sqlite3.connect)
     sqlite3.connect = guarded_connect
+    sqlite3.dbapi2.connect = guarded_connect
+
+    original_open = os.open
+    os.open = _guard_os_open(original_open)
+    if original_open in os.supports_dir_fd:
+        os.supports_dir_fd.add(os.open)
+    def deny_special_file(*args, **kwargs):
+        _deny("special filesystem node creation disabled")
+    for name in ("mkfifo", "mknod"):
+        if hasattr(os, name):
+            setattr(os, name, deny_special_file)
+
+    for name in ("connect", "connect_ex", "sendto", "sendmsg"):
+        if hasattr(socket.socket, name):
+            setattr(socket.socket, name, _guard_socket_call(getattr(socket.socket, name), name))
+    for name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr", "getnameinfo"):
+        setattr(socket, name, _guard_resolver(getattr(socket, name), name))
+    socket.SocketType = socket.socket
+    if hasattr(_socket, "socketpair"):
+        _socket.socketpair = _guard_native_socketpair(_socket.socketpair)
 
     original_bind = socket.socket.bind
     def guarded_bind(sock, address):
-        permitted_pair = getattr(_socketpair, "active", False) and isinstance(address, tuple) and address[1] == 0
-        if not ((_loopback_test or permitted_pair) and isinstance(address, tuple) and address[0] in ("127.0.0.1", "::1")):
-            _deny("network listener disabled")
+        _check_bind(address)
         result = original_bind(sock, address)
         _listeners[sock] = sock.getsockname()
         return result
@@ -262,7 +381,7 @@ def self_test():
     checks = [
         lambda: smtplib.SMTP("smtp.invalid", 587),
         lambda: smtplib.SMTP_SSL("smtp.invalid", 465),
-        lambda: socket.getaddrinfo("external.invalid", 443),
+        lambda: _guard_resolver(lambda *args: None, "getaddrinfo")("external.invalid", 443),
         lambda: sqlite3.connect(str(REPOSITORY / "watcher.sqlite")),
         lambda: (REPOSITORY / ".env").read_text(),
         lambda: (REPOSITORY / "playwright_state.json").read_text(),
@@ -281,7 +400,7 @@ def self_test():
         conn.execute("CREATE TABLE synthetic (id INTEGER)")
         with expected_violation():
             try:
-                conn.execute("ATTACH DATABASE ? AS forbidden", (str(REPOSITORY / "never-open.sqlite"),))
+                conn.execute("ATTACH DATABASE ? AS forbidden", (":memory:",))
             except sqlite3.DatabaseError:
                 pass
             else:
