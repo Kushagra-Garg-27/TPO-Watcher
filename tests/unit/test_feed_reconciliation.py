@@ -107,17 +107,34 @@ async def test_reconciliation_test_d_fetch_failure_preserves_active_state(repo):
     Expected:
         NO active records are deactivated.
     """
+    from unittest.mock import AsyncMock
+    from app.monitoring.watcher import AuthManager
+
     detector = CompanyDetector(repo)
     comp_a = _create_record("1", "Company A")
     comp_b = _create_record("2", "Company B")
     detector.process_fetched_companies([comp_a, comp_b])
 
     watcher = PlacementWatcher(db=repo)
-    with patch.object(TPOClient, "fetch_companies", side_effect=AuthenticationError("Session expired (HTTP 401)")):
-        with patch.object(watcher.auth, "get_valid_page", return_value=MagicMock()):
-            with patch.object(watcher.auth, "is_authenticated", return_value=True):
-                with patch.object(watcher.auth, "login", return_value=None):
-                    await watcher.check_once()
+    initial_auth = watcher.auth
+    # Recovery constructs a new AuthManager; class patches cover both instances.
+    with (
+        patch.object(TPOClient, "fetch_companies", new_callable=AsyncMock,
+                     side_effect=AuthenticationError("Session expired (HTTP 401)")) as fetch,
+        patch.object(AuthManager, "get_valid_page", new_callable=AsyncMock,
+                     return_value=MagicMock()) as get_page,
+        patch.object(AuthManager, "is_authenticated", new_callable=AsyncMock,
+                     return_value=True) as authenticated,
+        patch.object(AuthManager, "stop", new_callable=AsyncMock, return_value=None) as stop,
+        patch.object(AuthManager, "login", new_callable=AsyncMock, return_value=None) as login,
+    ):
+        assert await watcher.check_once() is False
+        assert watcher.auth is not initial_auth
+        assert fetch.await_count == 2
+        assert get_page.await_count == 2
+        assert authenticated.await_count == 2
+        stop.assert_awaited_once_with()
+        login.assert_not_awaited()
 
     # Active companies remain untouched
     assert repo.get_company("1")["is_active"] == "True"
