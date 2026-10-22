@@ -10,6 +10,10 @@ on:
         description: Approved canonical source tree SHA256 from qualification script
         required: true
         type: string
+      artifact_bytes_available:
+        description: Verified remaining artifact storage bytes allocated to this run
+        required: true
+        type: string
 permissions:
   contents: read
 concurrency:
@@ -31,8 +35,31 @@ jobs:
         env:
           EXPECTED_SOURCE_SHA256: ${{ inputs.source_sha256 }}
         run: node scripts/qualify-native-arm64.mjs
-      - name: Retain acceptance and transferable runtime image for one day
+      - name: Enforce verified artifact storage allocation
+        id: storage
         if: always()
+        env:
+          ARTIFACT_BYTES_AVAILABLE: ${{ inputs.artifact_bytes_available }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const value=process.env.ARTIFACT_BYTES_AVAILABLE || '';
+          if(!/^[1-9][0-9]*$/.test(value)) throw Error('Verified artifact allowance required');
+          const limit=BigInt(value);
+          let total=0n;
+          if(!fs.existsSync('native-evidence')) throw Error('No native evidence');
+          for(const path of fs.readdirSync('native-evidence',{recursive:true})) {
+            const s=fs.statSync('native-evidence/'+path);
+            if(s.isFile()) total+=BigInt(s.size);
+          }
+          // Reserve at least 10% plus 1 MiB for artifact packaging overhead.
+          const bounded=total+(total+9n)/10n+1048576n;
+          console.log(`Artifact bytes=${total}; bounded bytes=${bounded}; allocation=${limit}`);
+          if(bounded>limit) throw Error('Storage allocation exceeded; upload withheld, no extra charges authorized');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,'approved=true\n');
+          JS
+      - name: Retain acceptance and transferable runtime image for one day
+        if: always() && steps.storage.outputs.approved == 'true'
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1
         with:
           name: native-release-${{ github.run_id }}
