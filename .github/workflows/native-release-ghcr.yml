@@ -1,0 +1,287 @@
+name: Qualify and retain exact ARM64 release
+
+# Merge and dispatch require separate owner approval. No automatic publication.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tpo-native-ghcr-retention
+  cancel-in-progress: false
+
+jobs:
+  qualify-and-retain:
+    if: github.repository == 'Kushagra-Garg-27/TPO-Watcher' && github.ref == 'refs/heads/main' && !github.event.repository.private
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    # One job keeps the tested image local; no billable Actions artifact transfer.
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASE_COMMIT: 98609861cf608fb9f97eb490d0376ceb190a07f3
+      EXPECTED_SOURCE_SHA256: fafc09bfed71e11eadb0a7bf72b4a1749b52096104fd12550a809a9b2fb27f5e
+      IMAGE_REPOSITORY: ghcr.io/kushagra-garg-27/tpo-watcher-release
+    steps:
+      - name: Fetch only the approved public commit without authentication
+        shell: bash
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_TERMINAL_PROMPT: '0'
+        run: |
+          set -euo pipefail
+          git init .
+          git -c credential.helper= -c http.extraheader= fetch --no-tags --depth=1 \
+            https://github.com/Kushagra-Garg-27/TPO-Watcher.git "$RELEASE_COMMIT"
+          git checkout --detach FETCH_HEAD
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a
+        with:
+          node-version: '24'
+          token: ''
+      - name: Verify approved checkout and free public runner scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          test "$(node scripts/qualify-native-arm64.mjs --source-identity)" = "$EXPECTED_SOURCE_SHA256"
+          test "$(uname -m)" = aarch64
+          curl --fail --silent --show-error https://api.github.com/repos/Kushagra-Garg-27/TPO-Watcher |
+            node --input-type=module -e 'let s="";for await(const c of process.stdin)s+=c;const r=JSON.parse(s);if(r.private!==false||r.full_name!=="Kushagra-Garg-27/TPO-Watcher")process.exit(1)'
+      - name: Rebuild and qualify this image without source, SMTP or production access
+        run: node scripts/qualify-native-arm64.mjs
+      - name: Audit saved configuration and every historical layer before credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import gzip, hashlib, json, os, pathlib, re, tarfile
+          root = pathlib.Path.cwd()
+          evidence = root / 'native-evidence'
+          acceptance = json.loads((evidence / 'acceptance.json').read_text())
+          image = json.loads((evidence / 'runtime-image.json').read_text())
+          def require(ok, rule):
+              if not ok:
+                  raise SystemExit('Image audit rejected: ' + rule)
+          require(acceptance['native_tests_passed'] is True and acceptance['archive_verified'] is True, 'native acceptance')
+          require(acceptance['canonical'] == os.environ['EXPECTED_SOURCE_SHA256'], 'canonical identity')
+          require(acceptance['image_id'] == image['Id'], 'tested image identity')
+          source = json.loads((evidence / 'source.json').read_text())
+          require(source['commit'] == os.environ['RELEASE_COMMIT'] and source['canonical'] == acceptance['canonical'], 'commit')
+          expected = {x['path']: x['sha256'] for x in source['files']}
+          archive = evidence / 'runtime.docker.tar.gz'
+          def digest(stream):
+              h = hashlib.sha256()
+              for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                  h.update(chunk)
+              return 'sha256:' + h.hexdigest()
+          with archive.open('rb') as stream:
+              require(digest(stream) == 'sha256:' + acceptance['archive_sha256'], 'compressed archive checksum')
+          with gzip.open(archive, 'rb') as stream:
+              require(digest(stream) == 'sha256:' + acceptance['uncompressed_tar_sha256'], 'archive round trip')
+          # No extraction onto the host. Scan deleted/overwritten files in ALL layers too.
+          sensitive_path = re.compile(r'(^|/)(\.env(?:\..*)?|\.git|\.aws|\.ssh|\.auth|secrets?|credentials|storageState[^/]*|[^/]*playwright[_-]state[^/]*)(/|$)|\.(sqlite[^/]*|db|pem|key|p12|pfx)$', re.I)
+          secret = re.compile(rb'-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----[\r\n]+[A-Za-z0-9+/=\r\n]{64,}|(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{60,}|AKIA[A-Z0-9]{16}|ASIA[A-Z0-9]{16})')
+          counts = {'layers': 0, 'files_scanned': 0, 'bytes_scanned': 0, 'source_files_matched': 0}
+          matched = set()
+          with tarfile.open(archive, 'r:gz') as outer:
+              manifest = json.load(outer.extractfile('manifest.json'))
+              require(len(manifest) == 1, 'single runtime image archive')
+              entry = manifest[0]
+              config_raw = outer.extractfile(entry['Config']).read()
+              require('sha256:' + hashlib.sha256(config_raw).hexdigest() == image['Id'], 'config ID')
+              config = json.loads(config_raw)
+              require(config['architecture'] == 'arm64' and config['os'] == 'linux', 'native architecture')
+              c = config['config']
+              require(c['User'] == '10001:10001' and c['WorkingDir'] == '/app', 'non-root runtime')
+              require(c['Entrypoint'] == ['python', '-B', '-m', 'app.production_entrypoint'], 'entrypoint')
+              require(c['Cmd'] == ['--config', '/run/tpo/runtime.json'], 'external runtime configuration')
+              require(not c.get('Volumes'), 'unexpected implicit volume')
+              labels = c.get('Labels', {})
+              require(labels.get('org.opencontainers.image.source') == 'https://github.com/Kushagra-Garg-27/TPO-Watcher', 'repository linkage')
+              require(labels.get('org.opencontainers.image.source-manifest-sha256') == acceptance['canonical'], 'source label')
+              allowed_env = {'PATH', 'LANG', 'GPG_KEY', 'PYTHON_VERSION', 'PYTHON_SHA256', 'PYTHONDONTWRITEBYTECODE', 'PYTHONUNBUFFERED', 'PIP_DISABLE_PIP_VERSION_CHECK', 'PLAYWRIGHT_BROWSERS_PATH'}
+              require(all(v.split('=', 1)[0] in allowed_env for v in c.get('Env', [])), 'environment allowlist')
+              require(not secret.search(config_raw), 'credential material in config/history')
+              diffs = config['rootfs']['diff_ids']
+              require(diffs == image['RootFS']['Layers'] and len(diffs) == len(entry['Layers']), 'tested filesystem identity')
+              for layer_name, expected_diff in zip(entry['Layers'], diffs):
+                  require(digest(outer.extractfile(layer_name)) == expected_diff, 'layer checksum')
+                  counts['layers'] += 1
+                  with tarfile.open(fileobj=outer.extractfile(layer_name), mode='r|') as layer:
+                      for member in layer:
+                          p = pathlib.PurePosixPath(member.name)
+                          require(not p.is_absolute() and '..' not in p.parts, 'unsafe layer path')
+                          name = str(p)
+                          # System CA certificates are public and expected; private data paths are not.
+                          app_or_home = name.startswith(('app/', 'root/', 'home/', 'run/tpo/', 'var/lib/tpo/'))
+                          require(not (app_or_home and sensitive_path.search(name)), 'private runtime path')
+                          require(not (name.startswith(('app/data/', 'var/lib/tpo/', 'run/tpo/')) and member.isfile()), 'embedded runtime data/config')
+                          if name.startswith('app/app/') and not name.startswith('app/app/static/'):
+                              require(member.isdir() or member.isfile(), 'application link/device')
+                              if member.isfile():
+                                  repo_path = name[4:]
+                                  require(repo_path in expected, 'unreviewed application file')
+                          if not member.isfile():
+                              continue
+                          counts['files_scanned'] += 1
+                          file_hash = hashlib.sha256()
+                          with layer.extractfile(member) as stream:
+                              carry = b''
+                              first_chunk = True
+                              for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                                  # SQLite libraries contain the magic string internally; databases start with it.
+                                  require(not (first_chunk and chunk.startswith(b'SQLite format 3\x00')), 'secret/database content')
+                                  first_chunk = False
+                                  require(not secret.search(carry + chunk), 'secret/database content')
+                                  file_hash.update(chunk)
+                                  carry = (carry + chunk)[-8192:]
+                                  counts['bytes_scanned'] += len(chunk)
+                          if name.startswith('app/app/') and not name.startswith('app/app/static/'):
+                              require(file_hash.hexdigest() == expected[name[4:]], 'application source substitution')
+                              matched.add(name[4:])
+                              counts['source_files_matched'] += 1
+          require(matched == {p for p in expected if p.startswith('app/') and not p.startswith('app/static/')}, 'application inventory incomplete')
+          report = {'audit_passed': True, **counts, 'image_id': image['Id'], 'canonical': acceptance['canonical'], 'architecture': config['architecture'], 'user': c['User'],
+                    'scope': 'All historical layers, config/history, source-file equality, credential signatures and private-data paths; heuristic scan is not a guarantee against every secret format.'}
+          (evidence / 'image-audit.json').write_text(json.dumps(report, indent=2))
+          print(json.dumps(report))
+          PY
+      - name: Publish audited image once and verify registry bytes and pulled identity
+        # Credential exposure is confined to this step, AFTER every native/audit gate.
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          DOCKER_CONFIG: ${{ runner.temp }}/tpo-ghcr-auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$DOCKER_CONFIG"
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -f "$DOCKER_CONFIG/config.json"; rmdir "$DOCKER_CONFIG" 2>/dev/null || true' EXIT
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, re, subprocess, urllib.error, urllib.parse, urllib.request
+          e = pathlib.Path('native-evidence')
+          acceptance = json.loads((e / 'acceptance.json').read_text())
+          audit = json.loads((e / 'image-audit.json').read_text())
+          tested = json.loads((e / 'runtime-image.json').read_text())
+          def require(ok, rule):
+              if not ok:
+                  raise SystemExit('Registry verification rejected: ' + rule)
+          require(audit['audit_passed'] is True and audit['image_id'] == tested['Id'] == acceptance['image_id'], 'audit/acceptance identity')
+          require(acceptance['native_tests_passed'] is True and acceptance['archive_verified'] is True, 'native checks')
+          repository = os.environ['IMAGE_REPOSITORY']
+          path = repository.removeprefix('ghcr.io/')
+          # Unique release/run tag; re-runs of the same run MUST NOT overwrite it.
+          # GHCR tags can be changed by admins; deployment identity is the immutable digest.
+          tag = 'release-' + os.environ['RELEASE_COMMIT'] + '-run-' + os.environ['GITHUB_RUN_ID']
+          remote = repository + ':' + tag
+          credentials = base64.b64encode((os.environ['GITHUB_ACTOR'] + ':' + os.environ['GHCR_TOKEN']).encode()).decode()
+          class RegistryRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, fp, code, message, headers, new_url):
+                  target = urllib.parse.urlsplit(new_url)
+                  require(target.scheme == 'https' and target.hostname and not target.username and not target.password, 'HTTPS registry redirect')
+                  redirected = super().redirect_request(request, fp, code, message, headers, new_url)
+                  if urllib.parse.urlsplit(request.full_url).netloc != target.netloc:
+                      redirected.remove_header('Authorization')
+                  return redirected
+          opener = urllib.request.build_opener(RegistryRedirect())
+          token_url = 'https://ghcr.io/token?' + urllib.parse.urlencode({'service': 'ghcr.io', 'scope': 'repository:' + path + ':pull,push'})
+          request = urllib.request.Request(token_url, headers={'Authorization': 'Basic ' + credentials})
+          with opener.open(request, timeout=60) as response:
+              token = json.load(response)['token']
+          print('::add-mask::' + token, flush=True)
+          def get(kind, identity):
+              url = 'https://ghcr.io/v2/' + path + '/' + kind + '/' + identity
+              return opener.open(urllib.request.Request(url, headers={
+                  'Authorization': 'Bearer ' + token,
+                  'Accept': 'application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'}), timeout=120)
+          try:
+              with get('manifests', tag):
+                  raise SystemExit('Release tag already exists; refusing overwrite')
+          except urllib.error.HTTPError as error:
+              require(error.code == 404, 'tag lookup must succeed or report missing')
+              codes = {x.get('code') for x in json.load(error).get('errors', [])}
+              require(bool(codes) and codes <= {'MANIFEST_UNKNOWN', 'NAME_UNKNOWN'}, 'unambiguous missing tag')
+          def docker(*args, capture=False):
+              result = subprocess.run(['docker', *args], check=True, text=True, stdout=subprocess.PIPE if capture else None)
+              return result.stdout if capture else None
+          local = 'tpo-native:' + os.environ['EXPECTED_SOURCE_SHA256'][:12]
+          require(json.loads(docker('image', 'inspect', local, capture=True))[0]['Id'] == tested['Id'], 'local tested tag')
+          docker('tag', tested['Id'], remote)
+          # Push one tested platform manifest, not an index with extra attestations/images.
+          pushed = docker('push', '--platform', 'linux/arm64', remote, capture=True)
+          matches = re.findall(r'digest: (sha256:[a-f0-9]{64})', pushed)
+          require(len(matches) == 1, 'actual push manifest digest')
+          registry_digest = matches[0]
+          with get('manifests', tag) as response:
+              manifest_raw = response.read()
+              require(response.headers.get('Docker-Content-Digest') == registry_digest, 'registry response digest')
+          require('sha256:' + hashlib.sha256(manifest_raw).hexdigest() == registry_digest, 'manifest bytes')
+          manifest = json.loads(manifest_raw)
+          require(manifest.get('schemaVersion') == 2 and 'layers' in manifest and 'config' in manifest, 'single image manifest')
+          require(manifest['config']['digest'] == tested['Id'], 'registry config ID')
+          with get('blobs', manifest['config']['digest']) as response:
+              config_raw = response.read()
+          require('sha256:' + hashlib.sha256(config_raw).hexdigest() == tested['Id'], 'retrieved config bytes')
+          config = json.loads(config_raw)
+          require(config['rootfs']['diff_ids'] == tested['RootFS']['Layers'], 'registry filesystem')
+          require(len(manifest['layers']) == len(tested['RootFS']['Layers']), 'registry layer count')
+          for descriptor, diff_id in zip(manifest['layers'], tested['RootFS']['Layers']):
+              require(not descriptor.get('urls'), 'foreign layer URL')
+              require(descriptor.get('mediaType') in ('application/vnd.oci.image.layer.v1.tar+gzip', 'application/vnd.docker.image.rootfs.diff.tar.gzip'), 'gzip layer media type')
+              # Retrieve every compressed blob, even when Docker already has it cached.
+              with get('blobs', descriptor['digest']) as response:
+                  destination = pathlib.Path(os.environ['RUNNER_TEMP']) / 'tpo-registry-layer.gz'
+                  h, size = hashlib.sha256(), 0
+                  with destination.open('wb') as output:
+                      for chunk in iter(lambda: response.read(1024 * 1024), b''):
+                          h.update(chunk); size += len(chunk); output.write(chunk)
+              require('sha256:' + h.hexdigest() == descriptor['digest'] and size == descriptor['size'], 'retrieved blob bytes')
+              raw_hash = hashlib.sha256()
+              with gzip.open(destination, 'rb') as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                      raw_hash.update(chunk)
+              require('sha256:' + raw_hash.hexdigest() == diff_id, 'retrieved uncompressed layer identity')
+              destination.unlink()
+          pinned = repository + '@' + registry_digest
+          docker('pull', '--platform', 'linux/arm64', pinned)
+          pulled = json.loads(docker('image', 'inspect', pinned, capture=True))[0]
+          require(pulled['Id'] == tested['Id'] and pulled['Config'] == tested['Config'] and pulled['RootFS'] == tested['RootFS'], 'pulled tested image equality')
+          require(pinned in pulled['RepoDigests'], 'pulled digest binding')
+          report = {'retained_image_verified': True, 'image': pinned, 'tag': remote,
+                    'registry_manifest_digest': registry_digest, 'image_config_id': tested['Id'],
+                    'release_commit': os.environ['RELEASE_COMMIT'], 'source_sha256': acceptance['canonical'],
+                    'workflow_commit': os.environ['GITHUB_SHA'],
+                    'run_url': 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/' + os.environ['GITHUB_RUN_ID'],
+                    'native_tests_passed': True, 'audit': audit, 'layers_retrieved_and_verified': len(manifest['layers']),
+                    'visibility': 'Not changed by workflow; first publication defaults private. Owner must separately approve public anonymous pulls.',
+                    'production_accessed': False, 'actions_artifact_uploads': 0}
+          (e / 'ghcr-acceptance.json').write_text(json.dumps(report, indent=2))
+          print(json.dumps(report, indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('### Retained native ARM64 image acceptance\n```json\n' + json.dumps(report, indent=2) + '\n```\n')
+          PY
+      - name: Report qualification facts without an Actions artifact upload
+        if: always()
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          for (const name of ['acceptance.json','image-audit.json','ghcr-acceptance.json']) {
+            const file='native-evidence/'+name;
+            if (fs.existsSync(file)) console.log(name+': '+fs.readFileSync(file,'utf8'));
+          }
+          for (const name of ['installed-lock.log','packages.log','chromium.log']) {
+            const file='native-evidence/'+name;
+            if (fs.existsSync(file)) console.log(name+': '+fs.readFileSync(file,'utf8'));
+          }
+          for (const name of ['bootstrap','guarded-0','guarded-1','guarded-2','guarded-3','guarded-4','guarded-5','native-linux']) {
+            const file='native-evidence/'+name+'.log';
+            if (fs.existsSync(file)) {
+              const lines=fs.readFileSync(file,'utf8').split('\n').filter(line=>/\b[0-9]+ (passed|failed|skipped)\b/.test(line));
+              console.log(name+': '+JSON.stringify(lines.map(line=>line.slice(0,400))));
+            }
+          }
+          console.log('Only ghcr-acceptance.json with retained_image_verified=true authorizes describing a retrievable release artifact. A failed push/pull leaves no deployment approval; do not reuse a tag or delete evidence automatically.');
+          JS
