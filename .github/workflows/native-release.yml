@@ -1,0 +1,42 @@
+name: Native release qualification
+on:
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: Approved full 40-character release commit SHA
+        required: true
+        type: string
+      source_sha256:
+        description: Approved canonical source tree SHA256 from qualification script
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: native-release-qualification
+  cancel-in-progress: false
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.release_ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a
+        with:
+          node-version: '24'
+      - name: Build and qualify the exact native image
+        env:
+          EXPECTED_SOURCE_SHA256: ${{ inputs.source_sha256 }}
+        run: node scripts/qualify-native-arm64.mjs
+      - name: Retain acceptance and transferable runtime image for one day
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1
+        with:
+          name: native-release-${{ github.run_id }}
+          path: native-evidence/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
