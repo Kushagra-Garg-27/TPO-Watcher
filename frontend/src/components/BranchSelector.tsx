@@ -80,7 +80,7 @@ export function BranchSelector({ value, onChange, error, id }: BranchSelectorPro
         id={id || buttonId}
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-controls={listboxId}
+        aria-controls={open ? listboxId : undefined}
         aria-label="Select your engineering branch"
         onClick={() => setOpen((prev) => !prev)}
         onKeyDown={onButtonKeyDown}
@@ -90,7 +90,7 @@ export function BranchSelector({ value, onChange, error, id }: BranchSelectorPro
           !selectedBranch && 'text-muted'
         )}
       >
-        <span className={cn('truncate', selectedBranch ? 'text-foreground font-medium' : 'text-muted/60')}>
+        <span className={cn('truncate', selectedBranch ? 'text-foreground font-medium' : 'text-muted')}>
           {selectedBranch?.label ?? 'Select your engineering programme...'}
         </span>
         <motion.span animate={{ rotate: open ? 180 : 0 }} transition={{ duration: 0.15 }}>
@@ -119,7 +119,7 @@ export function BranchSelector({ value, onChange, error, id }: BranchSelectorPro
               placeholder="Search branch code or keyword (e.g. CSE, IT, AI)..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full px-2 py-1.5 text-xs bg-transparent text-foreground placeholder:text-muted/60 focus:outline-none font-sans"
+              className="w-full px-2 py-1.5 text-xs bg-transparent text-foreground placeholder:text-muted focus:outline-none font-sans"
               onKeyDown={(e) => {
                 if (e.key === 'Escape') {
                   setOpen(false)

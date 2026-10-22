@@ -17,6 +17,7 @@ from app.api.rate_limiter import check_rate_limit, get_client_ip
 from app.api.security_utils import is_valid_token_format, get_token_fingerprint
 from app.api.session import revoke_session_token, perform_logout
 from app.api.web_views import spa_response
+from app.database.notification_compatibility import repository_factory, repository_unit, account_request_response
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +27,7 @@ EMAIL_REGEX = re.compile(r"^[\w\.-]+@([\w\.-]+\.)+[\w-]{2,}$")
 
 def get_db_repos():
     from app.database.repository import DB_PATH
-    from app.database.sqlite_repository import SQLiteUserRepository, SQLiteTokenRepository
-    return SQLiteUserRepository(DB_PATH), SQLiteTokenRepository(DB_PATH)
+    return repository_factory(DB_PATH)
 
 def get_current_user_id(
     tpo_session: Optional[str] = Cookie(None),
@@ -49,7 +49,14 @@ def get_current_user_id(
     # Verify user exists in database and is active (revocation on unsubscribe)
     user_repo, _ = repos
     user = user_repo.get_by_id(user_id)
-    if not user or user.get("is_active") != 1:
+    from app.database.account_schema import account_policy_enabled
+    from app.auth.accounts import AccountService
+    production_access = None
+    if hasattr(user_repo, "_get_conn"):
+        with user_repo._get_conn() as connection:
+            if account_policy_enabled(connection):
+                production_access = AccountService(connection).session_valid(user_id, tpo_session)
+    if not user or (production_access is False) or (production_access is None and user.get("is_active") != 1):
         logger.warning(f"Session rejected: user {user_id} not found or deactivated.")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -106,27 +113,46 @@ def exchange_magic_link_confirm(
     fingerprint = get_token_fingerprint(payload.token)
     user_repo, token_repo = repos
 
-    token_hash = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
-    token_row = token_repo.claim_action_token(token_hash, "MANAGE_PREFS")
+    with repository_unit(repos):
+        from app.database.account_schema import account_policy_enabled
+        from app.auth.accounts import AccountService
+        production = False
+        if hasattr(user_repo, "_get_conn"):
+            with user_repo._get_conn() as connection:
+                production = account_policy_enabled(connection)
+        token_hash = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
+        token_row = token_repo.claim_action_token(token_hash, "ACCOUNT_LOGIN" if production else "MANAGE_PREFS")
 
-    if not token_row:
-        logger.warning(f"Magic link confirm failed: invalid or expired token (fingerprint: {fingerprint}).")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired preference link."
-        )
+        if not token_row:
+            logger.warning(f"Magic link confirm failed: invalid or expired token (fingerprint: {fingerprint}).")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired preference link."
+            )
 
-    user_id = token_row["user_id"]
-    user = user_repo.get_by_id(user_id)
-    if not user or user.get("is_active") != 1:
-        logger.warning(f"Session creation rejected: user {user_id} not found or deactivated.")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User account is deactivated or not found."
-        )
+        user_id = token_row["user_id"]
+        user = user_repo.get_by_id(user_id)
+        allowed = bool(user and user.get("is_active") == 1)
+        if production:
+            with user_repo._get_conn() as connection:
+                allowed = AccountService(connection).can_login(user_id)
+        if not allowed:
+            logger.warning(f"Session creation rejected: user {user_id} not found or deactivated.")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User account is deactivated or not found."
+            )
 
-    # Supersede/invalidate any older unused preference tokens for this user
-    token_repo.invalidate_user_tokens(user_id, "MANAGE_PREFS")
+        # Supersede/invalidate any older unused preference tokens for this user
+        token_repo.invalidate_user_tokens(user_id, "ACCOUNT_LOGIN" if production else "MANAGE_PREFS")
+        session_token = create_session_token(user_id=user_id, secret_key=settings.SECRET_KEY, max_age_seconds=3600)
+        if production:
+            with user_repo._get_conn() as connection:
+                service = AccountService(connection)
+                existing = request.cookies.get("tpo_session")
+                if existing:
+                    service.revoke_session(existing)
+                service.register_session(user_id, session_token)
 
     # Session Fixation Prevention: revoke any pre-existing session token from the client
     existing_cookie = request.cookies.get("tpo_session")
@@ -134,7 +160,6 @@ def exchange_magic_link_confirm(
         revoke_session_token(existing_cookie)
 
     # Create fresh 1-hour session token with 256-bit CSPRNG entropy
-    session_token = create_session_token(user_id=user_id, secret_key=settings.SECRET_KEY, max_age_seconds=3600)
 
     is_secure = (
         bool(getattr(settings, "COOKIE_SECURE", True))
@@ -204,37 +229,39 @@ def request_preference_link(
     )
     check_rate_limit(
         request=request,
-        key=f"req_link:email:{payload.email.lower()}",
+        key=f"req_link:email:{hashlib.sha256(payload.email.lower().encode('utf-8')).hexdigest()}",
         max_requests=getattr(settings, "RATE_LIMIT_MAGIC_LINK_PER_EMAIL", 5),
         window_seconds=900,
         detail="Too many preference link requests for this email address. Please try again later."
     )
 
     user_repo, token_repo = repos
-    user = user_repo.get_by_email(payload.email)
-
-    if user and user["is_verified"] == 1 and user["is_active"] == 1:
-        # Invalidate existing unused preference tokens
-        token_repo.invalidate_user_tokens(user["id"], "MANAGE_PREFS")
-
-        # Create 15-minute single-use token with 256 bits of CSPRNG entropy
-        raw_token = secrets.token_urlsafe(32)
-        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
-        token_repo.create_token(
-            user_id=user["id"],
-            token_hash=token_hash,
-            token_type="MANAGE_PREFS",
-            expires_at=expires_at
-        )
-
-        email_service.send_preference_link_email(user["email"], raw_token)
-        logger.info(f"Preference access link dispatched for user {user['id']}. Fingerprint: {token_hash[:8]}")
-
-    return {
-        "status": "success",
-        "message": "If an active account exists for this email, a 15-minute access link has been sent to your inbox."
-    }
+    raw_token = None
+    with repository_unit(repos):
+        user = user_repo.get_by_email(payload.email)
+        production = False
+        allowed = bool(user and user["is_verified"] == 1 and user["is_active"] == 1)
+        from app.database.account_schema import account_policy_enabled
+        from app.auth.accounts import AccountService
+        if hasattr(user_repo, "_get_conn"):
+            with user_repo._get_conn() as connection:
+                production = account_policy_enabled(connection)
+                if production:
+                    allowed = bool(user and AccountService(connection).can_login(user["id"]))
+        if allowed:
+            kind = "ACCOUNT_LOGIN" if production else "MANAGE_PREFS"
+            token_repo.invalidate_user_tokens(user["id"], kind)
+            raw_token = secrets.token_urlsafe(32)
+            token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+            token_repo.create_token(user["id"], token_hash, kind,
+                datetime.now(timezone.utc) + timedelta(minutes=15))
+    if raw_token is not None:
+        try:
+            email_service.send_preference_link_email(user["email"], raw_token)
+        except Exception:
+            logger.warning("Account-link request could not complete transport processing.")
+    return account_request_response(repos,
+        "If an active account exists for this email, a 15-minute access link has been sent to your inbox.")
 
 @router.get("/preferences")
 def get_preferences(
@@ -293,10 +320,11 @@ def update_preferences(
 @router.post("/preferences/logout")
 def logout_preferences(
     response: Response,
-    request: Request
+    request: Request,
+    repos = Depends(get_db_repos)
 ):
     """
     Temporary compatibility route for session logout.
     Delegates to shared perform_logout handler.
     """
-    return perform_logout(request, response)
+    return perform_logout(request, response, repos=repos)

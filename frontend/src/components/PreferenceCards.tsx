@@ -97,7 +97,7 @@ export function PreferenceCards({ values, onChange }: PreferenceCardsProps) {
                   >
                     {pref.title}
                   </span>
-                  <span className="text-[11px] font-mono tracking-wider text-muted/60 uppercase">
+                  <span className="text-[11px] font-mono tracking-wider text-muted uppercase">
                     [{pref.badge}]
                   </span>
                 </div>

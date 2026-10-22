@@ -109,7 +109,7 @@ export function UnsubscribePage({ token, navigate }: UnsubscribePageProps) {
                 SUBSCRIPTION CANCELLED
               </h1>
               <p className="mt-3 text-sm text-muted font-light max-w-sm mx-auto font-sans leading-relaxed">
-                You have been unsubscribed from VIT TPO alerts. Any pending notifications have been cancelled.
+                You have been unsubscribed from VIT TPO alerts. Future sends are suppressed. An email already being sent or accepted by the mail provider may still arrive.
               </p>
               <button
                 type="button"

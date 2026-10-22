@@ -13,10 +13,6 @@ type VerifyState = 'confirming' | 'loading' | 'success' | 'error'
 export function VerifyPage({ token, navigate }: VerifyPageProps) {
   const [state, setState] = useState<VerifyState>(() => {
     if (!token) {
-      // Check if URL search has legacy status
-      const params = new URLSearchParams(window.location.search)
-      const status = params.get('status')
-      if (status === 'success') return 'success'
       return 'error'
     }
     return 'confirming'
@@ -24,9 +20,7 @@ export function VerifyPage({ token, navigate }: VerifyPageProps) {
 
   const [message, setMessage] = useState(() => {
     if (!token) {
-      const params = new URLSearchParams(window.location.search)
-      const msg = params.get('message') || params.get('detail')
-      return msg || 'The verification token is missing. Please use the link directly from your email.'
+      return 'The verification token is missing. Please use the link directly from your email.'
     }
     return ''
   })
@@ -42,7 +36,7 @@ export function VerifyPage({ token, navigate }: VerifyPageProps) {
     const res = await api.verifyConfirm(token)
     if (res.ok) {
       setState('success')
-      setMessage(res.data?.message || 'Your email has been verified. You will receive alerts for matching TPO opportunities.')
+      setMessage(res.data?.message || 'Email ownership verified. Enrollment review, destination verification and email consent are separate account checks.')
     } else {
       setState('error')
       setMessage(res.error || 'The link may have expired or already been used. Please sign up again.')
@@ -70,10 +64,10 @@ export function VerifyPage({ token, navigate }: VerifyPageProps) {
                 EMAIL VERIFICATION
               </span>
               <h1 className="font-display text-2xl uppercase text-foreground tracking-wide">
-                ACTIVATE TPO ALERTS
+                VERIFY EMAIL OWNERSHIP
               </h1>
               <p className="mt-3 text-sm text-muted font-light max-w-sm mx-auto font-sans leading-relaxed">
-                Click below to verify your email address and activate your placement and internship notifications.
+                Confirm ownership of this email address. Enrollment review and notification consent are separate steps in your account settings.
               </p>
               <div className="mt-8 flex flex-col gap-3">
                 <button
@@ -99,7 +93,7 @@ export function VerifyPage({ token, navigate }: VerifyPageProps) {
             <>
               <Loader2 className="h-12 w-12 text-accent animate-spin mx-auto mb-5" />
               <h1 className="font-display text-2xl uppercase tracking-wide text-foreground">
-                VERIFYING SUBSCRIPTION...
+                VERIFYING EMAIL OWNERSHIP...
               </h1>
               <p className="mt-2 text-xs font-mono text-muted tracking-wider">
                 CONFIRMING CRYPTOGRAPHIC TOKEN
@@ -118,13 +112,13 @@ export function VerifyPage({ token, navigate }: VerifyPageProps) {
                 <CheckCircle2 className="h-8 w-8" />
               </motion.div>
               <span className="text-[10px] font-mono tracking-[0.2em] text-accent uppercase block mb-1">
-                ACTIVATION SUCCESSFUL
+                OWNERSHIP CONFIRMED
               </span>
               <h1 className="font-display text-3xl uppercase text-foreground tracking-wide">
                 EMAIL VERIFIED
               </h1>
               <p className="mt-3 text-sm text-muted font-light max-w-sm mx-auto font-sans leading-relaxed">
-                {message || 'Your email has been verified. You will receive alerts for matching TPO opportunities.'}
+                {message || 'Email ownership verified. Review your account settings before enabling notifications.'}
               </p>
               <div className="mt-8 flex flex-col gap-3">
                 <button

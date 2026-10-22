@@ -62,7 +62,7 @@ def verify_session_token(token: str, secret_key: str) -> Optional[int]:
 
     # Check expiry
     now = int(time.time())
-    if now > expires_at:
+    if now >= expires_at:
         return None
 
     # Verify signature in constant time
@@ -109,7 +109,7 @@ def reset_session_revocations() -> None:
         _REVOKED_SESSIONS.clear()
 
 
-def perform_logout(request, response) -> dict:
+def perform_logout(request, response, repos=None) -> dict:
     """
     Consolidated session logout handler:
     1. Revokes server-side session token if present.
@@ -119,6 +119,14 @@ def perform_logout(request, response) -> dict:
 
     tpo_session = request.cookies.get("tpo_session")
     if tpo_session:
+        if repos is not None and hasattr(repos[0], "_get_conn"):
+            from app.database.account_schema import account_policy_enabled
+            from app.auth.accounts import AccountService
+            from app.database.notification_compatibility import repository_unit
+            with repository_unit(repos):
+                with repos[0]._get_conn() as connection:
+                    if account_policy_enabled(connection):
+                        AccountService(connection).revoke_session(tpo_session)
         revoke_session_token(tpo_session)
         logger.info("Session revoked upon logout.")
     is_secure = bool(

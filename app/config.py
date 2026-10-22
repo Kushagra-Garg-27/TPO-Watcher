@@ -66,3 +66,36 @@ class Settings(BaseSettings):
         return [t.strip() for t in self.CHECK_TIMES.split(",") if t.strip()]
 
 settings = Settings()
+
+
+# Explicit objects only: these are deliberately not environment-backed Settings.
+from dataclasses import dataclass
+from enum import Enum
+
+
+class RuntimeMode(str,Enum):
+    LEGACY='LEGACY'
+    OFF='OFF'
+    V2_FAKE='V2_FAKE'
+    DRAIN_ONLY_FAKE='DRAIN_ONLY_FAKE'
+    SHUTDOWN_HOLD='SHUTDOWN_HOLD'
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    mode: RuntimeMode=RuntimeMode.LEGACY
+    controller_identity: str | None=None
+    generation: int | None=None
+    provider_identity: str | None=None
+    custody_generation: int | None=None
+    idle_wait_ms: int=100
+    info_ttl_ms: int=60000
+
+    def __post_init__(self):
+        if not isinstance(self.mode,RuntimeMode):raise ValueError('explicit runtime enum required')
+        if type(self.idle_wait_ms) is not int or not 10<=self.idle_wait_ms<=1000:raise ValueError('bounded drain wait required')
+        if type(self.info_ttl_ms) is not int or not 1<=self.info_ttl_ms<=86400000:raise ValueError('explicit fictional INFO lifetime required')
+        if self.generation is not None and (type(self.generation) is not int or self.generation<1):raise ValueError('explicit positive generation required')
+        if self.controller_identity is not None and (not isinstance(self.controller_identity,str) or not 1<=len(self.controller_identity)<=64):raise ValueError('bounded controller identity required')
+        if self.provider_identity is not None and (not isinstance(self.provider_identity,str) or not 1<=len(self.provider_identity)<=64):raise ValueError('explicit custody identity required')
+        if self.custody_generation is not None and (type(self.custody_generation) is not int or self.custody_generation<1):raise ValueError('positive custody generation required')

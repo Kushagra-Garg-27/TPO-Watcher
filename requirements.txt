@@ -10,3 +10,4 @@ fastapi
 uvicorn[standard]
 slowapi
 jinja2
+cryptography==50.0.2

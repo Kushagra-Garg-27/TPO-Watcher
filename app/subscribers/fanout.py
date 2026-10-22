@@ -8,6 +8,56 @@ from app.subscribers.matcher import SubscriptionMatcher
 logger = logging.getLogger(__name__)
 
 class FanoutEngine:
+    @staticmethod
+    def advance_v2(repository,handles,*,pages=20,faults=None):
+        """Bounded durable fanout using the existing v2 writer transaction."""
+        if type(pages) is not int or not 1<=pages<=20:
+            raise ValueError("bounded fanout quantum required")
+        from app.database.event_repository import Fenced, PolicyDenied
+        faults=faults or {}
+        progress=0
+        attempted=set()
+        for _ in range(pages):
+            candidates=repository.c.execute("""SELECT * FROM event_outbox
+                WHERE status IN('PENDING','PROCESSING') ORDER BY created_ms,intent_id,channel""").fetchall()
+            selected=None
+            for candidate in candidates:
+                key=(candidate["intent_id"],candidate["channel"])
+                if key in attempted:continue
+                handle=handles.get(key)
+                if candidate["status"]=="PROCESSING" and candidate["lease_ms"]>repository.now() and handle is None:
+                    continue
+                selected,key=candidate,key
+                break
+            if selected is None:break
+            try:
+                handle=handles.get(key)
+                if handle is None:
+                    handle=repository.claim_outbox(*key)
+                    if handle is None:
+                        attempted.add(key)
+                        continue
+                    handles[key]=handle
+                if selected["sealed_ms"] is None:
+                    repository.seal(handle,fault=faults.get("seal"))
+                # Zero-recipient completion is explicit and has no delivery page.
+                status=repository.c.execute("SELECT status FROM event_outbox WHERE intent_id=? AND channel=?",key).fetchone()[0]
+                if status!="COMPLETE":
+                    repository.fanout_page(handle,fault=faults.get("page"))
+                progress+=1
+                if repository.c.execute("SELECT status FROM event_outbox WHERE intent_id=? AND channel=?",key).fetchone()[0]=="COMPLETE":
+                    handles.pop(key,None)
+                    attempted.add(key)
+            except (Fenced,PolicyDenied):
+                handles.pop(key,None)
+                attempted.add(key)
+            except Exception:
+                # The failed unit rolled back; keep its durable preparation for
+                # fenced lease recovery, and give the other channel a turn.
+                handles.pop(key,None)
+                attempted.add(key)
+        return progress
+
     def __init__(
         self, 
         user_repo: UserRepositoryProtocol, 

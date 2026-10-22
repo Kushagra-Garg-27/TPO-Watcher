@@ -7,8 +7,8 @@ import {
 import { PreferenceCards } from '../components/PreferenceCards'
 import { api, type PreferencesResponse } from '../lib/api'
 import { cn, isValidEmail } from '../lib/utils'
-import { getBranchLabel } from '../lib/branches'
 import { Footer } from '../components/Footer'
+import { AccountPanel } from '../components/AccountPanel'
 
 interface PreferencesPageProps {
   navigate: (path: string) => void
@@ -71,8 +71,12 @@ export function PreferencesPage({ navigate }: PreferencesPageProps) {
     }
 
     setReqLoading(true)
-    await api.requestPreferenceLink(reqEmail.trim().toLowerCase())
+    const result = await api.requestPreferenceLink(reqEmail.trim().toLowerCase())
     setReqLoading(false)
+    if (!result.ok) {
+      setReqError(result.error || 'Access link could not be requested. Please try again.')
+      return
+    }
 
     // Uniform response to prevent email enumeration
     setPageState('link-sent')
@@ -100,7 +104,8 @@ export function PreferencesPage({ navigate }: PreferencesPageProps) {
   }
 
   async function handleSignOut() {
-    await api.logout()
+    const result = await api.logout()
+    if (!result.ok) { setSaveState('error'); setSaveMsg('Sign out could not be confirmed. Please try again.'); return }
     setPreferences(null)
     setPageState('request-link')
   }
@@ -229,10 +234,10 @@ export function PreferencesPage({ navigate }: PreferencesPageProps) {
                 <CheckCircle2 className="h-8 w-8" />
               </div>
               <h2 className="font-display text-3xl uppercase text-foreground tracking-wide">
-                ACCESS LINK DISPATCHED
+                REQUEST RECEIVED
               </h2>
               <p className="mt-3 text-sm text-muted font-light max-w-md mx-auto font-sans leading-relaxed">
-                If an active verified subscription exists for that address, a secure 15-minute access link has been dispatched to your inbox.
+                Your request was received. If the address can sign in and mail is available, you will receive a single-use access link. Delivery may be held while sending is unavailable.
               </p>
               <div className="mt-6 p-4 bg-surface-2 rounded-lg border border-line text-xs font-mono text-muted text-left">
                 Open the link in your email to authenticate this browser session and update your opportunity alerts.
@@ -274,7 +279,7 @@ export function PreferencesPage({ navigate }: PreferencesPageProps) {
                   <span className="text-[10px] font-mono tracking-widest text-muted uppercase">SUBSCRIBER IDENTITY</span>
                   <div className="flex items-center gap-3">
                     <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
-                      ● ACTIVE
+                      ● SIGNED IN
                     </span>
                     <button
                       type="button"
@@ -290,12 +295,6 @@ export function PreferencesPage({ navigate }: PreferencesPageProps) {
                     <span className="text-muted block text-[10px] uppercase">EMAIL</span>
                     <span className="text-foreground font-semibold truncate block mt-0.5 font-sans">
                       {preferences.email}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-muted block text-[10px] uppercase">PROGRAMME</span>
-                    <span className="text-foreground font-semibold block mt-0.5">
-                      {getBranchLabel(preferences.branch_canonical)}
                     </span>
                   </div>
                 </div>
@@ -357,6 +356,7 @@ export function PreferencesPage({ navigate }: PreferencesPageProps) {
                   </div>
                 </div>
               </form>
+              <AccountPanel onSessionEnd={() => { setPreferences(null); setPageState('request-link') }} />
             </motion.div>
           )}
 

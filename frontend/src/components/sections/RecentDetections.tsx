@@ -74,9 +74,9 @@ export function RecentDetections() {
               02 // INTELLIGENCE ARCHIVE
             </span>
             <h2 className="font-display text-4xl sm:text-6xl md:text-7xl uppercase text-foreground leading-[0.9] tracking-tight">
-              VERIFIED OPPORTUNITY
+              HISTORICAL OPPORTUNITY
               <br />
-              <span className="text-muted">DETECTIONS</span>
+              <span className="text-muted">EXAMPLES</span>
             </h2>
           </FadeUp>
 
@@ -91,7 +91,7 @@ export function RecentDetections() {
                     : 'text-muted hover:text-foreground'
                 }`}
               >
-                ALL RECENT ({VERIFIED_DETECTIONS.length})
+                ALL EXAMPLES ({VERIFIED_DETECTIONS.length})
               </button>
               <button
                 type="button"
@@ -160,7 +160,7 @@ export function RecentDetections() {
 
                     <div className="flex items-center gap-1.5 text-xs font-mono text-emerald-400">
                       <CheckCircle2 className="h-3.5 w-3.5" />
-                      <span className="tracking-wider uppercase">NOTIFIED</span>
+                      <span className="tracking-wider uppercase">ARCHIVE EXAMPLE</span>
                     </div>
                   </div>
                 </div>
@@ -173,7 +173,7 @@ export function RecentDetections() {
         <div className="mt-12 text-xs font-mono text-muted flex items-center gap-3">
           <Building2 className="h-4 w-4 text-accent shrink-0" />
           <span>
-            Records represent historical opportunities observed from the VIT TPO schedule repository. Values are verified and never simulated.
+            Static examples retained from the earlier site. These are not current listings, eligibility evidence, or delivery history. Use the source listings above for available observation data.
           </span>
         </div>
       </div>

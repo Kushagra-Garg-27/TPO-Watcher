@@ -19,20 +19,32 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Set up Python 3.12
+      - name: Set up Python 3.12.10
         uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
           cache: "pip"
 
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --only-binary=:all: --require-hashes -r requirements-linux-x64.lock
+          python -m pip check
 
-      - name: Run pytest test suite
+      - name: Set up Node.js for guarded matrix orchestration
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a
+        with:
+          node-version: "24"
+
+      - name: Run complete guarded regression matrix
         run: |
-          pytest -v
+          node scripts/run_guarded_regression.mjs python test-evidence
+
+      - name: Preserve exact test matrix and results
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1
+        with:
+          name: guarded-regression-evidence
+          path: test-evidence/
 
   frontend-checks:
     name: Frontend Lint & Build
@@ -57,6 +69,10 @@ jobs:
         working-directory: frontend
         run: |
           npm run lint
+
+      - name: Verify frontend API contracts
+        working-directory: frontend
+        run: node --experimental-strip-types --test tests/*.test.mjs
 
       - name: Run TypeScript typecheck & Vite production build
         working-directory: frontend

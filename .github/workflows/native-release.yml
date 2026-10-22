@@ -1,0 +1,90 @@
+name: Native release qualification
+on:
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: Approved full 40-character release commit SHA
+        required: true
+        type: string
+      source_sha256:
+        description: Approved canonical source tree SHA256 from qualification script
+        required: true
+        type: string
+      artifact_bytes_available:
+        description: Independently verified unused storage bytes; 0 means unverified and disables uploads
+        required: false
+        default: '0'
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: native-release-qualification
+  cancel-in-progress: false
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.release_ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a
+        with:
+          node-version: '24'
+      - name: Build and qualify the exact native image
+        id: native
+        env:
+          EXPECTED_SOURCE_SHA256: ${{ inputs.source_sha256 }}
+        run: node scripts/qualify-native-arm64.mjs
+      - name: Enforce verified artifact storage allocation
+        id: storage
+        if: always()
+        env:
+          ARTIFACT_BYTES_AVAILABLE: ${{ inputs.artifact_bytes_available }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const value=process.env.ARTIFACT_BYTES_AVAILABLE || '';
+          if(!/^(0|[1-9][0-9]*)$/.test(value)) throw Error('Nonnegative verified storage allocation required');
+          const ceiling=536870912n, verified=BigInt(value), limit=verified<ceiling?verified:ceiling;
+          const dir='native-evidence', archive='runtime.docker.tar.gz';
+          const bounded=bytes=>bytes+(bytes+9n)/10n+1048576n;
+          let acceptance={native_tests_passed:false,archive_verified:false};
+          if(fs.existsSync(`${dir}/acceptance.json`)) acceptance=JSON.parse(fs.readFileSync(`${dir}/acceptance.json`));
+          const files=fs.existsSync(dir)?fs.readdirSync(dir,{recursive:true}).filter(p=>fs.statSync(`${dir}/${p}`).isFile()):[];
+          // Logs remain in the job even with no verified allowance and no artifact upload.
+          console.log(JSON.stringify({native_tests_passed:acceptance.native_tests_passed,
+            image_id:acceptance.image_id,build_manifest_digest:acceptance.build_manifest_digest,
+            archive_verified:acceptance.archive_verified,archive_sha256:acceptance.archive_sha256,
+            archive_bytes:acceptance.archive_bytes,owner_ceiling_bytes:Number(ceiling),
+            verified_storage_bytes:value,storage_verified:verified>0n,transferable_image_available:false}));
+          const compact=files.filter(p=>p!==archive && !p.endsWith('.tar') && !p.endsWith('.gz'));
+          const bytes=paths=>paths.reduce((n,p)=>n+BigInt(fs.statSync(`${dir}/${p}`).size),0n);
+          const full=acceptance.archive_verified===true && files.includes(archive) && bounded(bytes(files))<=limit;
+          const selected=full?files:compact;
+          const total=bytes(selected), fits=selected.length>0 && bounded(total)<=limit;
+          console.log(`Selected bytes=${total}; bounded bytes=${bounded(total)}; effective allocation=${limit}; image selected=${full}`);
+          if(!fits) { console.log('No upload: allocation unverified or insufficient. Native results remain in job logs.'); process.exit(0); }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,`approved=true\nimage_selected=${full}\n`);
+          // Exact file list prevents a large/failed archive from entering a compact upload.
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,'paths<<TPO_PATHS\n'+selected.map(p=>`${dir}/${p}`).join('\n')+'\nTPO_PATHS\n');
+          JS
+      - name: Retain acceptance and transferable runtime image for one day
+        id: upload
+        if: always() && steps.storage.outputs.approved == 'true'
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1
+        with:
+          name: native-release-${{ github.run_id }}
+          path: ${{ steps.storage.outputs.paths }}
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+      - name: Report transferable image availability
+        if: always()
+        env:
+          NATIVE_RESULT: ${{ steps.native.outcome }}
+          UPLOAD_RESULT: ${{ steps.upload.outcome }}
+          IMAGE_SELECTED: ${{ steps.storage.outputs.image_selected }}
+        run: |
+          node -e 'console.log(JSON.stringify({native_step:process.env.NATIVE_RESULT,upload:process.env.UPLOAD_RESULT,transferable_image_available:process.env.IMAGE_SELECTED==="true" && process.env.UPLOAD_RESULT==="success"}))'

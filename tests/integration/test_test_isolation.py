@@ -509,3 +509,154 @@ def test_linux_owned_descriptor_operations_and_safe_cleanup(tmp_path):
     nested.mkdir()
     (nested / "synthetic.txt").write_text("synthetic")
     shutil.rmtree(directory)
+def test_guarded_child_installs_before_app_and_has_distinct_pid():
+    with isolation.start_test_child("client") as child:
+        assert child.ready["guard_installed"] is True
+        assert child.ready["app_loaded"] is False
+        assert child.ready["pid"]!=os.getpid()
+        assert child.request("probe",{"check":"guard"})["guard_installed"] is True
+
+
+def test_guarded_child_denies_original_process_network_smtp_sqlite_and_secrets():
+    with isolation.start_test_child("client") as child:
+        result=child.request("probe",{"check":"denials"})
+        assert result=={"denied":6,"app_loaded":False}
+        with pytest.raises(RuntimeError,match="IsolationViolation"):
+            child.request("app.main",{})
+
+
+@pytest.mark.parametrize("change",["nonce","role","executable","module","arguments","descriptors","traversal","root"])
+def test_child_launch_contract_rejects_unapproved_combinations(change,monkeypatch,tmp_path):
+    import secrets
+    import time
+    nonce=secrets.token_hex(32)
+    ticket={"role":"client","used":False,"expires":time.monotonic()+10}
+    monkeypatch.setitem(isolation._child_tickets,nonce,ticket)
+    argv=[str(isolation._INTERPRETER),"-I","-B",str(isolation._BOOTSTRAP),"--r2a-child","client",nonce,str(isolation.ROOT),"--stdio"]
+    values=dict(executable=str(isolation._INTERPRETER),root=str(isolation.ROOT),nonce=nonce,descriptors=(0,1,2))
+    if change=="nonce":values["nonce"]="0"*64
+    elif change=="role":argv[5]="browser"
+    elif change=="executable":values["executable"]="unapproved-executable"
+    elif change=="module":argv[3]="app/main.py"
+    elif change=="arguments":argv.append("--self-test")
+    elif change=="descriptors":values["descriptors"]=(0,1,2,99)
+    elif change=="traversal":values["root"]=str(isolation.ROOT/"tmp"/"..")
+    else:values["root"]=str(tmp_path)
+    with pytest.raises(isolation.IsolationViolation):isolation.validate_child_launch(argv,**values)
+
+
+def test_child_nonce_consumed_no_arbitrary_audit_exception_or_descendant(monkeypatch):
+    with isolation.start_test_child("client") as child:
+        assert isolation._child_tickets[child.nonce]["used"]
+        assert not child.grant_path.exists()
+        with pytest.raises(isolation.IsolationViolation):
+            isolation.validate_child_launch([],executable=str(isolation._INTERPRETER),root=str(isolation.ROOT),nonce=child.nonce)
+        with isolation.expected_violation():
+            with pytest.raises(isolation.IsolationViolation):subprocess.run([str(isolation._INTERPRETER),"-c","pass"])
+
+
+def test_child_exit_proof_requires_actual_python_process_end_and_cleanup():
+    child=isolation.start_test_child("authority")
+    with pytest.raises(ValueError):child.exit_evidence()
+    child.terminate()
+    proof=child.exit_evidence()
+    assert proof["pid"]==child.ready["pid"] and proof["scope"].startswith("THIS_PROCESS")
+    child.close()
+    assert child.closed and child.nonce not in isolation._child_processes and not child.grant_path.exists()
+
+
+def test_wrong_wire_nonce_kills_child_without_follow_on_import():
+    child=isolation.start_test_child("client")
+    try:
+        child._write(dict(nonce="0"*64,sequence=1,operation="open",payload={}))
+        with pytest.raises(EOFError):child._receive(3)
+        assert child.exit_evidence()["pid"]==child.ready["pid"]
+    finally:child.close()
+    assert child.nonce not in isolation._child_processes
+
+
+def test_symlink_root_is_rejected_before_spawn(monkeypatch):
+    from pathlib import Path
+    original=Path.is_symlink
+    monkeypatch.setattr(Path,"is_symlink",lambda p:True if p==isolation.ROOT else original(p))
+    with pytest.raises(isolation.IsolationViolation):isolation.start_test_child("client")
+
+
+def test_guard_install_failure_cannot_import_role_application(monkeypatch):
+    import secrets,time,json,hashlib
+    nonce=secrets.token_hex(32)
+    grant_path=isolation.ROOT/("r2a-child-"+nonce+".json")
+    grant=dict(role="client",root=str(isolation.ROOT),nonce_hash=hashlib.sha256(nonce.encode()).hexdigest(),
+        interpreter=str(isolation._INTERPRETER),bootstrap=str(isolation._BOOTSTRAP),descriptors=[0,1,2],
+        parent_pid=os.getppid(),launcher_pid=os.getppid(),expires=time.time()+5)
+    grant_path.write_text(json.dumps(grant))
+    def fail():raise isolation.IsolationViolation("TEST ISOLATION: synthetic guard installation failure")
+    import builtins
+    original=builtins.__import__
+    attempted=[]
+    def importing(name,*args,**kwargs):
+        if name.startswith("app."):attempted.append(name)
+        return original(name,*args,**kwargs)
+    monkeypatch.setattr(builtins,"__import__",importing)
+    monkeypatch.setattr(isolation,"install",fail)
+    monkeypatch.setattr(isolation,"_child_root",None)
+    monkeypatch.setattr(isolation,"child_role",None)
+    monkeypatch.setattr(isolation,"child_identity",None)
+    try:
+        with pytest.raises(isolation.IsolationViolation):isolation._run_test_child(["--r2a-child","client",nonce,str(isolation.ROOT),"--stdio"])
+        assert attempted==[]
+    finally:grant_path.unlink(missing_ok=True)
+
+
+def test_failed_child_handshake_cleans_owned_job_and_no_follow_on(monkeypatch):
+    original=isolation.GuardedChild._receive
+    def fail(self,timeout):
+        original(self,timeout) # The guard handshake exists, but the parent loses it.
+        raise TimeoutError("fictional handshake reply lost")
+    monkeypatch.setattr(isolation.GuardedChild,"_receive",fail)
+    baseline=set(isolation._child_processes)
+    with pytest.raises(TimeoutError):isolation.start_test_child("client")
+    assert set(isolation._child_processes)==baseline
+
+
+@pytest.mark.parametrize("budget",["active","total"])
+def test_child_execution_budget_is_default_deny(monkeypatch,budget):
+    if budget=="active":monkeypatch.setattr(isolation,"_child_processes",{str(i):None for i in range(6)})
+    else:monkeypatch.setattr(isolation,"_child_tickets",{str(i):None for i in range(256)})
+    with pytest.raises(isolation.IsolationViolation):isolation.start_test_child("client")
+
+
+@pytest.mark.parametrize('change',['nonce','role','executable','module','arguments','descriptors','traversal','root'])
+def test_controller_host_exact_launch_contract_rejects_unapproved_combinations(change,monkeypatch,tmp_path):
+    import secrets,time
+    nonce=secrets.token_hex(32)
+    monkeypatch.setitem(isolation._child_tickets,nonce,dict(role='controller-host-crash-test',used=False,expires=time.monotonic()+10))
+    argv=[str(isolation._INTERPRETER),'-I','-B',str(isolation._BOOTSTRAP),'--r2a-child','controller-host-crash-test',nonce,str(isolation.ROOT),'--stdio']
+    values=dict(executable=str(isolation._INTERPRETER),root=str(isolation.ROOT),nonce=nonce,descriptors=(0,1,2))
+    assert isolation.validate_child_launch(argv,**values)==argv
+    if change=='nonce':values['nonce']='0'*64
+    elif change=='role':argv[5]='authority'
+    elif change=='executable':values['executable']='unapproved-executable'
+    elif change=='module':argv[3]='app/main.py'
+    elif change=='arguments':argv.append('--execute')
+    elif change=='descriptors':values['descriptors']=(0,1,2,99)
+    elif change=='traversal':values['root']=str(isolation.ROOT/'tmp'/'..')
+    else:values['root']=str(tmp_path)
+    with pytest.raises(isolation.IsolationViolation):isolation.validate_child_launch(argv,**values)
+
+
+def test_controller_host_termination_has_no_pid_or_unrelated_child_authority():
+    with isolation.start_test_child('authority') as authority:
+        for value in (os.getpid(),authority,object(),None):
+            with pytest.raises(isolation.IsolationViolation):isolation.terminate_test_controller(value)
+        assert authority.request('probe',{'check':'guard'})['guard_installed']
+
+
+def test_controller_host_wrong_wire_nonce_exits_and_cannot_launch_descendants():
+    with isolation.start_test_child('controller-host-crash-test') as host:
+        assert host.request('probe',{'check':'denials'})==dict(denied=6,app_loaded=False)
+        host._write(dict(nonce='0'*64,sequence=host.sequence+1,operation='controller_status',payload={}))
+        with pytest.raises(EOFError):host._receive(3)
+        assert host.exit_evidence()['pid']==host.ready['pid']
+
+

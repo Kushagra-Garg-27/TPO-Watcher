@@ -86,7 +86,7 @@ export function SignupPage({ navigate }: SignupPageProps) {
 
     if (result.ok) {
       setFormState('success')
-      setSuccessMsg(result.data?.message || 'Verification link sent! Check your inbox.')
+      setSuccessMsg(result.data?.message || 'Registration request received. Email verification may be held while sending is unavailable.')
     } else {
       setFormState('error')
       setApiError(result.error || 'Something went wrong. Please try again.')
@@ -132,7 +132,7 @@ export function SignupPage({ navigate }: SignupPageProps) {
                     Recruiting companies post drives on VIERP with short registration windows—frequently closing in 24 to 48 hours. Missing an announcement because you didn't refresh a dashboard costs you an entire interview round.
                   </p>
                   <p>
-                    TPO-Watcher inverts the paradigm: instead of students constantly checking VIERP, an autonomous system watches on your behalf, matches your branch eligibility, and notifies your personal inbox with zero delay.
+                    TPO-Watcher inverts the paradigm: instead of students constantly checking VIERP, an autonomous system watches on your behalf, checks source programme information against reviewed account evidence, and queues updates for consenting recipients.
                   </p>
                 </div>
               </FadeUp>
@@ -180,10 +180,10 @@ export function SignupPage({ navigate }: SignupPageProps) {
                         <span className="text-accent">✓</span> Automated scans at 10:00, 17:00, 00:00 IST
                       </li>
                       <li className="flex items-start gap-2">
-                        <span className="text-accent">✓</span> Immediate inbox alert on release
+                        <span className="text-accent">✓</span> Durable alerts after an observed change
                       </li>
                       <li className="flex items-start gap-2">
-                        <span className="text-accent">✓</span> Filtered strictly to your branch
+                        <span className="text-accent">✓</span> Reviewed programme and cohort matching
                       </li>
                       <li className="flex items-start gap-2">
                         <span className="text-accent">✓</span> Zero VIERP passwords required
@@ -245,7 +245,7 @@ export function SignupPage({ navigate }: SignupPageProps) {
                         <CheckCircle2 className="h-8 w-8" />
                       </div>
                       <h3 className="font-display text-2xl sm:text-3xl text-foreground uppercase tracking-wide">
-                        CHECK YOUR INBOX
+                        REGISTRATION REQUEST RECEIVED
                       </h3>
                       <p className="mt-3 text-sm text-muted max-w-md mx-auto font-sans font-light leading-relaxed">
                         {successMsg}
@@ -253,9 +253,9 @@ export function SignupPage({ navigate }: SignupPageProps) {
                       <div className="mt-6 p-4 bg-surface-2 rounded-lg border border-line text-xs font-mono text-muted text-left">
                         <div className="flex items-center gap-2 text-foreground font-semibold mb-1">
                           <Mail className="h-3.5 w-3.5 text-accent" />
-                          <span>VERIFICATION LINK DISPATCHED</span>
+                          <span>VERIFY OWNERSHIP, THEN REVIEW ACCOUNT</span>
                         </div>
-                        Click the single-use link in your inbox within 24 hours to activate notifications. Once verified, your alerts begin immediately.
+                        When mail is available, use the single-use link to verify email ownership. Then sign in to review your destination and consent. Enrollment approval is required before eligibility-dependent alerts.
                       </div>
                       <button
                         type="button"

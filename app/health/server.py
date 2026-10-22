@@ -1,23 +1,43 @@
 import logging
 import sqlite3
+import os
 from datetime import datetime, timezone
 from typing import Dict, Any
-from fastapi import APIRouter, status
+from fastapi import APIRouter, status, Request
 from fastapi.responses import JSONResponse
 
-from app.database.repository import DB_PATH
+DB_PATH=os.environ.get('DB_PATH','watcher.sqlite')
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Health & Monitoring"])
 
+
+def inert_health(application,policy,index,assets):
+    from app.monitoring.deployment_policy import public_listing,PolicyError
+    available=False
+    try:
+        if getattr(application.state,'notification_runtime',None) is not None:
+            raise PolicyError('Unexpected runtime activation')
+        public_listing(policy)
+        available=index.is_file() and assets.is_dir()
+    except (PolicyError,OSError):pass
+    return dict(mode='INERT_REHEARSAL',live=True,read_only_ready=available,
+        notification_ready=False,polling=False,sending=False,consent_processing=False)
+
 @router.get("/health")
-def health_check() -> Dict[str, Any]:
+def health_check(request: Request) -> Dict[str, Any]:
     """
     Public health check probe.
     Checks SQLite database connectivity and provides baseline, watcher freshness, & delivery statistics.
     Does NOT allow triggering TPO scraping or administrative state modification.
     """
+    runtime=getattr(request.app.state,"notification_runtime",None)
+    if runtime is not None:
+        diagnostic=runtime.diagnostics()
+        running=diagnostic["runtime_available"]
+        return JSONResponse(status_code=200 if running else 503,
+            content={"status":"guarded" if running else "held","notification":diagnostic})
     db_ok = False
     baseline_ok = False
     deliveries_stats = {}

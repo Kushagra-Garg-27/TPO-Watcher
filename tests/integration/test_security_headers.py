@@ -1,4 +1,5 @@
 import socket
+import re
 import threading
 import urllib.request
 import pytest
@@ -74,7 +75,9 @@ def test_cache_control_spa_shell_policy():
         assert res.headers.get("cache-control") == "no-store", f"Failed on {path}"
 
     # 3. Hashed assets and static files must not have their cache policy overwritten
-    for asset_path in ["/favicon.svg", "/assets/index-BdLrdtJB.css"]:
+    stylesheet_paths = re.findall(r'href="(/assets/[^"\s]+\.css)"', client.get('/').text)
+    assert stylesheet_paths, 'Built SPA must reference its actual hashed stylesheet'
+    for asset_path in ["/favicon.svg", *stylesheet_paths]:
         res = client.get(asset_path)
         assert res.status_code == 200
         assert res.headers.get("cache-control") != "no-cache, must-revalidate", f"Failed on {asset_path}"
@@ -86,6 +89,13 @@ def test_security_headers_on_api_opportunities():
     res = client.get("/api/v1/opportunities")
     assert res.status_code == 200
     assert_required_security_headers(res.headers)
+
+
+def test_account_and_operator_responses_are_never_cacheable():
+    client = TestClient(app)
+    for path in ('/api/v1/account', '/api/v1/admin/accounts/1/review', '/account/destination/confirm'):
+        response = client.get(path)
+        assert response.headers.get('cache-control') == 'no-store', path
 
 
 def test_security_headers_on_static_asset():
