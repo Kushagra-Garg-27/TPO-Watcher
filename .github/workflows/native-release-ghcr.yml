@@ -106,6 +106,7 @@ jobs:
           public_pem_file_sha256 = 'dd1b8b925914f084262b36762a2fe12475860606cdd2938fd925f8ef38759d83'
           counts = {'layers': 0, 'files_scanned': 0, 'bytes_scanned': 0, 'source_files_matched': 0, 'public_self_test_pem_blocks': 0}
           matched = set()
+          fixture_files_seen = 0
           with tarfile.open(archive, 'r:gz') as outer:
               manifest = json.load(outer.extractfile('manifest.json'))
               require(len(manifest) == 1, 'single runtime image archive')
@@ -144,12 +145,16 @@ jobs:
                               if member.isfile():
                                   repo_path = name[4:]
                                   require(repo_path in expected, 'unreviewed application file')
+                          fixture_scope = name == public_pem_path and expected_diff == public_pem_layer
+                          if fixture_scope:
+                              require(member.isfile(), 'public self-test library file type')
+                              fixture_files_seen += 1
+                              require(fixture_files_seen == 1, 'duplicate public self-test library')
                           if not member.isfile():
                               continue
                           counts['files_scanned'] += 1
                           file_hash = hashlib.sha256()
                           accepted_public_pems = set()
-                          fixture_scope = name == public_pem_path and expected_diff == public_pem_layer
                           with layer.extractfile(member) as stream:
                               carry = b''
                               offset = 0
@@ -180,7 +185,7 @@ jobs:
                                   counts['bytes_scanned'] += len(chunk)
                                   offset += len(chunk)
                                   chunk = following
-                          if accepted_public_pems:
+                          if fixture_scope:
                               # Deferred whole-file check prevents even a one-byte modification from qualifying.
                               require(file_hash.hexdigest() == public_pem_file_sha256, 'public self-test library checksum')
                               require(accepted_public_pems == set(public_pems), 'public self-test PEM coverage')
@@ -189,6 +194,7 @@ jobs:
                               require(file_hash.hexdigest() == expected[name[4:]], 'application source substitution')
                               matched.add(name[4:])
                               counts['source_files_matched'] += 1
+          require(fixture_files_seen == 1, 'public self-test library absent')
           require(matched == {p for p in expected if p.startswith('app/') and not p.startswith('app/static/')}, 'application inventory incomplete')
           report = {'audit_passed': True, **counts, 'image_id': image['Id'], 'canonical': acceptance['canonical'], 'architecture': config['architecture'], 'user': c['User'],
                     'scope': 'All historical layers, config/history, source-file equality, credential signatures and private-data paths; heuristic scan is not a guarantee against every secret format.'}
