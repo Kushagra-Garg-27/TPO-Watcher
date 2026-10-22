@@ -13,9 +13,24 @@ class AuthenticationError(Exception):
     pass
 
 class TPOClient:
-    def __init__(self, context: BrowserContext, page: Optional[Page] = None):
+    def __init__(self, context: BrowserContext, page: Optional[Page] = None, *, listing_contract=None, clock=None, synthetic: bool = False):
         self.context = context
         self.page = page
+        self.listing_contract=listing_contract
+        self.clock=clock
+        self._listing_body=None
+        self.synthetic = synthetic
+
+    async def fetch_listing(self):
+        from app.tpo.listing import ListingContract,ListingPage,decode_listing_pages
+        if not isinstance(self.listing_contract,ListingContract) or not callable(self.clock):
+            raise ValueError("approved listing scope and explicit clock required")
+        await self.fetch_companies()
+        # This browser integration observes one dashboard response. It has no
+        # verified pagination/census contract and therefore cannot assert absence.
+        return decode_listing_pages([ListingPage(self._listing_body,1,1,
+            self.listing_contract.source_namespace,True)],contract=self.listing_contract,
+            observed_ms=self.clock(),complete=False)
 
     async def fetch_companies(self) -> List[CompanyRecord]:
         """
@@ -44,7 +59,7 @@ class TPOClient:
 
             logger.info("Initiating dashboard navigation and waiting for API response...")
             async with page.expect_response(
-                lambda res: "newschedulesdcopanies" in res.url,
+                lambda res: res.url.split("?",1)[0] == API_ENDPOINT,
                 timeout=35000
             ) as resp_info:
                 link = page.locator("a[href='/company-dashboard']").first
@@ -74,16 +89,18 @@ class TPOClient:
                 raise Exception(f"Invalid JSON from API: {e}")
                 
             if isinstance(data, dict) and data.get("error") and not data.get("company_list"):
-                err_msg = data.get("msg") or data.get("error")
-                logger.warning(f"API returned error payload: {err_msg}")
-                raise AuthenticationError(f"API authentication error: {err_msg}")
+                logger.warning("API returned an authentication error payload.")
+                raise AuthenticationError("API authentication rejected")
                 
             try:
+                from app.tpo.listing import validate_listing_body
+                validate_listing_body(data)
                 api_response = APIResponse(**data)
             except ValidationError as e:
                 logger.error("API schema validation failed.")
                 raise Exception(f"Unexpected API schema: {e}")
                 
+            self._listing_body=data
             logger.info(f"Successfully fetched {len(api_response.company_list)} companies.")
             try:
                 await page.goto("https://tpo.vierp.in/home", wait_until="domcontentloaded")
@@ -95,10 +112,10 @@ class TPOClient:
             if "login" in page.url or page.url.rstrip("/") == "https://tpo.vierp.in" or await page.locator("input[type='password']").count() > 0:
                 logger.warning("Redirected to login page. Session expired.")
                 raise AuthenticationError("Session expired (redirected to login)")
-            logger.error(f"Playwright error in fetch_companies: {e}")
+            logger.error("Browser source request failed (%s)", type(e).__name__)
             raise
         except AuthenticationError:
             raise
         except Exception as e:
-            logger.error(f"Error in fetch_companies: {e}")
+            logger.error("Source request failed (%s)", type(e).__name__)
             raise

@@ -8,6 +8,9 @@ logger = logging.getLogger(__name__)
 
 # Paths requiring Cache-Control: no-store
 NO_STORE_PREFIXES = (
+    "/api/v1/account",
+    "/api/v1/admin",
+    "/account",
     "/api/v1/auth",
     "/api/v1/preferences",
     "/api/v1/unsubscribe",

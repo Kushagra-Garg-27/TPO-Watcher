@@ -1,6 +1,7 @@
 import logging
 from typing import List, Optional
-from fastapi import APIRouter
+from fastapi import APIRouter, Request, HTTPException
+import time
 from pydantic import BaseModel
 
 from app.database.repository import DatabaseRepository, DB_PATH
@@ -24,11 +25,34 @@ class OpportunityResponse(BaseModel):
 
 
 @router.get("/opportunities", response_model=List[OpportunityResponse])
-def get_current_opportunities() -> List[OpportunityResponse]:
+def get_current_opportunities(request: Request) -> List[OpportunityResponse]:
     """
-    Public read-only endpoint returning currently active TPO opportunities
-    from the authoritative companies table (up to 5 records).
+    Compatibility projection of stored active flags (up to five records).
+    Use /opportunity-listing for verified listing freshness and scope.
     """
-    repo = DatabaseRepository(DB_PATH)
-    records = repo.get_active_opportunities(limit=5)
+    from app.database.opportunity_projection import legacy_projection
+    clock=getattr(request.app.state,"opportunity_clock",lambda:int(time.time()*1000))
+    path=getattr(request.app.state,"opportunity_database",DB_PATH)
+    try:records = legacy_projection(path,limit=5,now_ms=clock())
+    except Exception:raise HTTPException(503,"Opportunity projection is unavailable") from None
     return [OpportunityResponse(**rec) for rec in records]
+
+
+@router.get("/opportunity-listing")
+def get_verified_listing(request: Request):
+    """Fresh per-company evidence, rather than aggregate fetch/census health.
+
+    Without any per-company observation, even an initial successful empty
+    census conservatively returns UNVERIFIED. Historical rows never establish
+    current listing evidence by themselves.
+    """
+    from app.database.opportunity_projection import listing_projection
+    clock=getattr(request.app.state,"opportunity_clock",lambda:int(time.time()*1000))
+    path=getattr(request.app.state,"opportunity_database",DB_PATH)
+    try:
+        return listing_projection(path,now_ms=clock())
+    except (OSError,ValueError,RuntimeError):
+        raise HTTPException(503,"Verified listing is unavailable") from None
+    except Exception:
+        # No raw source, database path, custody or private data in public errors.
+        raise HTTPException(503,"Verified listing is unavailable") from None

@@ -2,6 +2,7 @@ services:
   watcher:
     build:
       context: .
+      target: legacy
       args:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
         BUILD_DATE: ${BUILD_DATE:-unknown}
@@ -22,6 +23,65 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  inert-rehearsal:
+    profiles: ["inert-rehearsal"]
+    # Import the approved OCI artifact; ingress changes must not rebuild it.
+    image: tpo-inert-rehearsal@sha256:c554b97b91573fe84ceca2fcbb6ad6b74b5f97d2cde1479ef1972c01e1ce4de6
+    platform: linux/arm64
+    restart: "no"
+    init: true
+    read_only: true
+    user: "10001:10001"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 512m
+    volumes:
+      - type: bind
+        source: ${TPO_INERT_REHEARSAL_DIR:-./inert-rehearsal-not-configured}
+        target: /run/tpo
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16777216
+    networks: ["inert-isolated"]
+    healthcheck:
+      test: ["CMD", "python", "-I", "-B", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2).close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 2
+
+  # Select inert-ingress explicitly; a profile-wide up also selects legacy services.
+  inert-ingress:
+    profiles: ["inert-rehearsal"]
+    image: docker.io/library/nginx@sha256:970364228b1e4f932abc22d321932816782cca8a20b85a77552a7cfe9acfb3b5
+    entrypoint: ["/usr/sbin/nginx"]
+    command: ["-c", "/etc/nginx/inert-ingress.conf", "-g", "daemon off;"]
+    restart: "no"
+    init: true
+    read_only: true
+    user: "101:101"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 32
+    mem_limit: 64m
+    ports:
+      - "127.0.0.1:18000:8080"
+    volumes:
+      - type: bind
+        source: ./deploy/inert-ingress.conf
+        target: /etc/nginx/inert-ingress.conf
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=8388608,mode=1777
+    networks: ["inert-isolated", "inert-publication"]
+    depends_on:
+      inert-rehearsal:
+        condition: service_healthy
 
   caddy:
     image: caddy:2
@@ -46,3 +106,10 @@ volumes:
   watcher_data:
   caddy_data:
   caddy_config:
+
+networks:
+  inert-isolated:
+    internal: true
+    enable_ipv6: false
+  inert-publication:
+    enable_ipv6: false

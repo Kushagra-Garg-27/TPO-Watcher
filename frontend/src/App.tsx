@@ -6,12 +6,14 @@ import { PreferencesConfirmPage } from './pages/PreferencesConfirmPage'
 import { VerifyPage } from './pages/VerifyPage'
 import { UnsubscribePage } from './pages/UnsubscribePage'
 import { ErrorPage } from './pages/ErrorPage'
+import { DestinationConfirmPage } from './pages/DestinationConfirmPage'
 
 type Route =
   | { page: 'home' }
   | { page: 'preferences' }
   | { page: 'preferences_confirm'; token: string }
   | { page: 'verify'; token: string }
+  | { page: 'destination'; token: string }
   | { page: 'unsubscribe'; token: string }
   | { page: 'error'; message: string }
 
@@ -55,6 +57,7 @@ function getRoute(): Route {
   const token = extractAndStripToken()
 
   if (path === '/api/v1/auth/verify' || path === '/verify') return { page: 'verify', token }
+  if (path === '/account/destination/confirm') return { page: 'destination', token }
   if (path === '/api/v1/unsubscribe' || path === '/unsubscribe') return { page: 'unsubscribe', token }
   if (path === '/api/v1/preferences/request' || path === '/preferences/confirm') return { page: 'preferences_confirm', token }
   if (path === '/preferences') return { page: 'preferences' }
@@ -90,6 +93,7 @@ export default function App() {
         {route.page === 'preferences' && <PreferencesPage navigate={navigate} />}
         {route.page === 'preferences_confirm' && <PreferencesConfirmPage token={route.token} navigate={navigate} />}
         {route.page === 'verify' && <VerifyPage token={route.token} navigate={navigate} />}
+        {route.page === 'destination' && <DestinationConfirmPage token={route.token} navigate={navigate} />}
         {route.page === 'unsubscribe' && <UnsubscribePage token={route.token} navigate={navigate} />}
         {route.page === 'error' && <ErrorPage message={route.message} navigate={navigate} />}
       </main>

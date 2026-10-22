@@ -43,7 +43,7 @@ export function Marquee({
 
   if (shouldReduceMotion) {
     return (
-      <div className={`overflow-x-auto py-6 border-y border-line ${className}`}>
+      <div aria-hidden="true" className={`overflow-x-auto py-6 border-y border-line ${className}`}>
         <div className="flex gap-12 px-6">
           {children || defaultContent}
         </div>

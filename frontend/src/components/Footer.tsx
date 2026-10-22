@@ -15,7 +15,7 @@ export function Footer({ navigate }: FooterProps) {
               TPO WATCHER
             </h2>
             <p className="mt-3 text-sm text-muted font-light max-w-md font-sans">
-              Autonomous placement intelligence and verified notification delivery for the VIT Pune Class of 2028.
+              Placement monitoring and consent-based opportunity updates for reviewed VIT Pune Class of 2028 accounts.
             </p>
           </div>
 
@@ -57,7 +57,7 @@ export function Footer({ navigate }: FooterProps) {
                   <ShieldCheck className="h-3.5 w-3.5" />
                   NO VIERP PASSWORDS
                 </li>
-                <li>100% AIR-GAPPED AUTH</li>
+                <li>PASSWORDLESS STUDENT SIGN-IN</li>
                 <li>256-BIT TOKEN ENTROPY</li>
                 <li>
                   <button
@@ -77,7 +77,7 @@ export function Footer({ navigate }: FooterProps) {
         <div className="pt-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-[11px] font-mono text-muted">
           <div className="flex items-center gap-2">
             <span className="h-1.5 w-1.5 rounded-full bg-accent animate-pulse-beacon" />
-            <span>VIT PUNE · B.TECH 2028 SPECIFICATION · PRODUCTION DEPLOYMENT</span>
+            <span>VIT PUNE · B.TECH 2028 · ENROLLMENT REVIEW REQUIRED</span>
           </div>
 
           <div className="flex items-center gap-4">

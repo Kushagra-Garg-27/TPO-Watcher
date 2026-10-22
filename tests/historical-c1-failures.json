@@ -1,0 +1,25 @@
+{
+  "description": "Frozen v1 diagnostic failures. Executed in full; exemption applies only when legacy production writers and senders are excluded by active release acceptance. No blanket module skip.",
+  "evidence": "CUMMINS_PHASE_C2_R2C_A_R2_CONTROLLER_HOST_PROCESS_CRASH_VALIDATION_REPORT.md section 6",
+  "nodes": [
+    "tests/integration/test_cummins_pipeline_stress.py::test_f05_deterministic_two_connections_require_disjoint_claims",
+    "tests/integration/test_cummins_pipeline_stress.py::test_f06_failed_fanout_after_persistence_is_replayed",
+    "tests/integration/test_cummins_pipeline_stress.py::test_f12_exhausted_crash_recovery_requires_terminal_state",
+    "tests/integration/test_cummins_pipeline_stress.py::test_f13_stale_release_cannot_overwrite_newer_sent",
+    "tests/integration/test_cummins_pipeline_stress.py::test_f16_admin_exception_must_not_block_student_processing",
+    "tests/integration/test_cummins_pipeline_stress.py::test_f10_queued_new_after_feed_deactivation_requires_freshness",
+    "tests/integration/test_cummins_pipeline_stress.py::test_full_no_reset_natural_cycle_characterization",
+    "tests/unit/test_cummins_natural_cycle_audit.py::test_f02_distinct_update_after_sent_is_independently_queueable",
+    "tests/unit/test_cummins_natural_cycle_audit.py::test_f03_unknown_compensation_units_must_not_be_asserted_as_lpa",
+    "tests/unit/test_cummins_natural_cycle_audit.py::test_f07_authenticated_branch_correction_requires_persisted_readback",
+    "tests/unit/test_cummins_natural_cycle_audit.py::test_f09_admin_reconstruction_preserves_times[regStarttime-11:31]",
+    "tests/unit/test_cummins_natural_cycle_audit.py::test_f09_admin_reconstruction_preserves_times[regEndtime-10:00]",
+    "tests/unit/test_cummins_natural_cycle_audit.py::test_f10_first_status_update_communicates_lifecycle[True-False-words0]",
+    "tests/unit/test_cummins_natural_cycle_audit.py::test_f10_first_status_update_communicates_lifecycle[False-True-words1]",
+    "tests/unit/test_cummins_natural_cycle_audit.py::test_f11_detected_label_uses_new_event_clock[admin]",
+    "tests/unit/test_cummins_natural_cycle_audit.py::test_f11_detected_label_uses_new_event_clock[subscriber]",
+    "tests/unit/test_cummins_natural_cycle_audit.py::test_f11_queued_new_keeps_event_deadline_snapshot",
+    "tests/unit/test_cummins_natural_cycle_audit.py::test_f15_branch_match_copy_states_full_eligibility_is_unconfirmed[admin]",
+    "tests/unit/test_cummins_natural_cycle_audit.py::test_f15_branch_match_copy_states_full_eligibility_is_unconfirmed[subscriber]"
+  ]
+}

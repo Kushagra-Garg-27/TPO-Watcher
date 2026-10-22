@@ -19,7 +19,32 @@ from app.monitoring.checkin import send_healthcheck_ping
 logger = logging.getLogger(__name__)
 
 class PlacementWatcher:
-    def __init__(self, db: Optional[DatabaseRepository] = None, db_path: Optional[str] = None):
+    def __init__(self, db: Optional[DatabaseRepository] = None, db_path: Optional[str] = None,
+                 *, notification_pipeline=None, source_client=None):
+        from app.monitoring.runtime_supervisor import current_runtime
+        from app.database.repository import DB_PATH
+        from app.database.event_repository import PolicyDenied
+        runtime=current_runtime(db.db_path if db is not None else db_path or DB_PATH)
+        if runtime is not None and (notification_pipeline is None or notification_pipeline is not runtime.pipeline):
+            raise PolicyDenied('guarded runtime excludes the legacy writer')
+        self.notification_pipeline = notification_pipeline
+        self.source_client = source_client
+        if notification_pipeline is not None:
+            from app.monitoring.notification_pipeline import NotificationPipeline
+            if not isinstance(notification_pipeline, NotificationPipeline) or db is None:
+                raise ValueError("explicit local v2 pipeline and existing disposable legacy repository required")
+            notification_pipeline.bind_legacy(db)
+            if source_client is None:
+                raise ValueError("explicit fictional source client required for local v2 watcher")
+            if getattr(source_client, "synthetic", False) is not True:
+                raise ValueError("explicit fictional feed required for local v2 watcher")
+            if not callable(getattr(source_client, "fetch_companies", None)) and not callable(getattr(source_client, "fetch_listing", None)):
+                raise ValueError("source client must provide callable fetch_companies or fetch_listing")
+            self.db = db
+            self.source_client = source_client
+            self.auth = None
+            self.delivery_worker = DeliveryWorker(db.deliveries, db.tokens, notification_pipeline=notification_pipeline)
+            return
         if db is not None:
             self.db = db
         elif db_path is not None:
@@ -55,6 +80,10 @@ class PlacementWatcher:
         return False
 
     async def _process_notifications(self):
+        from app.monitoring.runtime_supervisor import current_runtime
+        from app.database.event_repository import PolicyDenied
+        if current_runtime(self.db.db_path) is not None:
+            raise PolicyDenied('guarded runtime excludes legacy administrative drain')
         pending = self.db.get_pending_notifications()
         if not pending:
             return
@@ -105,6 +134,28 @@ class PlacementWatcher:
 
     async def check_once(self):
         """Performs a single check iteration with automatic re-authentication recovery."""
+        from app.monitoring.runtime_supervisor import current_runtime
+        from app.database.event_repository import PolicyDenied
+        runtime=current_runtime(self.db.db_path)
+        if runtime is not None:
+            if self.notification_pipeline is not runtime.pipeline:raise PolicyDenied('legacy writer excluded')
+            runtime.require_running('writer')
+        if self.notification_pipeline is not None:
+            if self.source_client is None:
+                raise PolicyDenied('explicit fictional source client required')
+            try:
+                if getattr(self.source_client, "synthetic", False) is not True:
+                    raise PolicyDenied('explicit fictional feed required')
+                if not callable(getattr(self.source_client, "fetch_companies", None)) and not callable(getattr(self.source_client, "fetch_listing", None)):
+                    raise PolicyDenied("source client must provide callable fetch_companies or fetch_listing")
+                await self.notification_pipeline.poll(self.source_client)
+                return True
+            except AuthenticationError as exc:
+                logger.warning("Source authentication error in synthetic observation: %s", exc)
+                return False
+            except Exception as exc:
+                logger.warning("Local v2 observation requires recovery (%s)", type(exc).__name__)
+                return False
         max_attempts = 2
         for attempt in range(max_attempts):
             try:
@@ -236,6 +287,9 @@ class PlacementWatcher:
                 await asyncio.sleep(60)
 
     async def run_forever(self):
+        if self.notification_pipeline is not None:
+            from app.database.event_repository import PolicyDenied
+            raise PolicyDenied('use the explicit bounded supervisor poll and drain calls')
         logger.info("VIT TPO Placement Watcher service started.")
         logger.info(f"Timezone: {settings.TIMEZONE}")
         check_times_display = ", ".join(settings.get_check_times_list())
@@ -264,4 +318,7 @@ class PlacementWatcher:
                 await asyncio.sleep(60)
 
     async def shutdown(self):
-        await self.auth.stop()
+        if self.notification_pipeline is not None:
+            self.notification_pipeline.shutdown()
+        elif self.auth is not None:
+            await self.auth.stop()

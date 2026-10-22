@@ -7,32 +7,32 @@ const PIPELINE_STEPS = [
     phase: 'SCAN',
     icon: <Eye className="h-5 w-5 text-accent" />,
     title: 'SCHEDULED MONITORING',
-    desc: 'The engine initiates autonomous browser sessions at 10:00, 17:00, and 00:00 IST, authenticating securely with server-side credentials.',
-    meta: '3 DAILY SCAN WINDOWS · ASIA/KOLKATA',
+    desc: 'The engine checks the source at the configured interval using separately authorized operator credentials. Students never supply VIERP passwords.',
+    meta: 'OPERATOR-CONFIGURED SOURCE CHECKS',
   },
   {
     step: '02',
     phase: 'DIFF',
     icon: <Sparkles className="h-5 w-5 text-accent" />,
     title: 'CHANGE DETECTION',
-    desc: 'Every observed company schedule is reconciled against known database state. New recruiters, registration dates, or package changes are immediately flagged.',
-    meta: 'ZERO FALSE DUPLICATES · PERSISTENT STATE',
+    desc: 'Observed schedules are compared with stored source records. Material changes are recorded using stable source identities.',
+    meta: 'STABLE SOURCE IDS · PERSISTENT STATE',
   },
   {
     step: '03',
     phase: 'MATCH',
     icon: <Filter className="h-5 w-5 text-accent" />,
     title: 'PROGRAM FILTERING',
-    desc: 'The matching engine parses eligibility across all 12 canonical VIT B.Tech programs and reconciles your preference for Internships, PPOs, or Placements.',
-    meta: '12 CANONICAL B.TECH DISCIPLINES',
+    desc: 'Source programmes are checked against reviewed enrollment and your opportunity preferences. A programme match alone does not establish full employer eligibility.',
+    meta: 'REVIEWED COHORT AND PROGRAMME',
   },
   {
     step: '04',
     phase: 'DISPATCH',
     icon: <MailCheck className="h-5 w-5 text-accent" />,
     title: 'ACTIONABLE INBOX ALERT',
-    desc: 'A verified notification is dispatched to your email with recruiter name, package CTC, deadline, and eligibility criteria—giving you the earliest window to act.',
-    meta: 'ZERO DELAY · DIRECT TO YOUR INBOX',
+    desc: 'When recipient checks pass and sending is available, opportunity updates can be emailed to your verified destination. Timing and delivery are not guaranteed.',
+    meta: 'CONSENT REQUIRED · DELIVERY CONTROLS',
   },
 ]
 
@@ -51,7 +51,7 @@ export function MonitoringPipeline() {
             <h2 className="font-display text-4xl sm:text-6xl md:text-7xl uppercase text-foreground leading-[0.9] tracking-tight">
               A SYSTEM IS WATCHING.
               <br />
-              <span className="text-muted">YOU KNOW IMMEDIATELY.</span>
+              <span className="text-muted">STAY INFORMED.</span>
             </h2>
             <p className="mt-5 text-sm sm:text-base text-muted font-light leading-relaxed max-w-xl font-sans">
               Instead of manually checking VIERP dozens of times every week, TPO-Watcher continuously monitors the source, processes eligibility diffs, and alerts you before registration closes.

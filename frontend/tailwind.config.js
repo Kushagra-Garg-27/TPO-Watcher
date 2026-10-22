@@ -21,7 +21,7 @@ export default {
           2: '#17171b',
           3: '#202026',
         },
-        muted: '#807f78',
+        muted: '#93918a',
         line: {
           DEFAULT: 'rgba(243,241,234,0.10)',
           strong: 'rgba(243,241,234,0.22)',

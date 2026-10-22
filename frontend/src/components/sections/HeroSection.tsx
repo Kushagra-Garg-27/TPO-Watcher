@@ -47,8 +47,8 @@ export function HeroSection({ onSubscribeClick }: HeroSectionProps) {
                   NEVER MISS THE NEXT <span className="text-accent underline decoration-accent/40 decoration-2 underline-offset-4">OPPORTUNITY.</span>
                 </p>
                 <p className="mt-3 text-sm sm:text-base text-muted leading-relaxed font-sans font-light">
-                  Continuous automated intelligence for VIT Pune placement schedules.
-                  When matching internships, PPOs, or full-time opportunities appear on VIERP, you know immediately.
+                  Scheduled monitoring of VIT Pune placement schedules.
+                  Opportunity emails depend on fresh source checks, reviewed enrollment, verified destination, consent and sending availability.
                 </p>
               </div>
             </FadeUp>
@@ -57,8 +57,8 @@ export function HeroSection({ onSubscribeClick }: HeroSectionProps) {
             <FadeUp delay={0.5} duration={0.6} yOffset={16}>
               <div className="mt-8 pt-6 border-t border-line flex flex-wrap items-center gap-6 sm:gap-10 text-xs font-mono">
                 <div>
-                  <span className="text-muted block text-[11px] tracking-widest uppercase">SCAN FREQUENCY</span>
-                  <span className="text-foreground font-semibold mt-0.5 block">10:00 · 17:00 · 00:00 IST</span>
+                  <span className="text-muted block text-[11px] tracking-widest uppercase">PLANNED SCANS</span>
+                  <span className="text-foreground font-semibold mt-0.5 block">OPERATOR CONFIGURED</span>
                 </div>
                 <div className="w-px h-6 bg-line hidden sm:block" />
                 <div>
@@ -69,8 +69,8 @@ export function HeroSection({ onSubscribeClick }: HeroSectionProps) {
                 </div>
                 <div className="w-px h-6 bg-line hidden sm:block" />
                 <div>
-                  <span className="text-muted block text-[11px] tracking-widest uppercase">TARGET SCOPE</span>
-                  <span className="text-foreground font-semibold mt-0.5 block">12 B.TECH BRANCHES</span>
+                  <span className="text-muted block text-[11px] tracking-widest uppercase">DELIVERY SCOPE</span>
+                  <span className="text-foreground font-semibold mt-0.5 block">REVIEWED ENROLLMENT</span>
                 </div>
               </div>
             </FadeUp>

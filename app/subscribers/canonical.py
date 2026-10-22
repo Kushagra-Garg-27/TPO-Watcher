@@ -1,7 +1,9 @@
 import logging
-import re
+from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Set, Optional
+
+from app.tpo.normalization import normalize_token, normalize_organizations, tokenize_programmes
 
 logger = logging.getLogger(__name__)
 
@@ -130,63 +132,65 @@ CANONICAL_TO_TPO_STRINGS: Dict[CanonicalBranch, List[str]] = {
     ]
 }
 
-def extract_eligible_canonical_branches(tpoprogram_str: Optional[str], programnew_str: Optional[str], organization_str: Optional[str] = None) -> Set[CanonicalBranch]:
-    """
-    Extracts canonical VIT branches eligible for an opportunity.
-    Enforces strict string matching based on observed values.
-    Logs unknown/unmapped programs for administrative review rather than silently guessing.
-    """
-    eligible: Set[CanonicalBranch] = set()
-    
-    # Check organization: VIT students are eligible only if "VIT" is in the organizations list
-    if organization_str:
-        orgs = [o.strip().upper() for o in organization_str.split(",") if o.strip()]
-        if "VIT" not in orgs:
-            logger.info(f"Opportunity organization '{organization_str}' does not include VIT Pune. Skipping VIT branches.")
-            return eligible
+@dataclass(frozen=True)
+class ProgrammeEvidence:
+    branches: frozenset[CanonicalBranch]
+    unresolved_reasons: tuple[str, ...]
 
-    combined_text = ""
-    if tpoprogram_str:
-        combined_text += " " + tpoprogram_str
-    if programnew_str:
-        combined_text += " " + programnew_str
 
-    if not combined_text.strip():
-        return eligible
+@dataclass(frozen=True)
+class EligibilityEvidence:
+    primary: ProgrammeEvidence
+    secondary: ProgrammeEvidence
+    organization_reason: Optional[str]
 
-    # Normalize tokens from tpoprogram and programnew (split by commas and semicolons)
-    tokens = set()
-    for s in re.split(r"[,;]", tpoprogram_str or ""):
-        st = s.strip()
-        if st:
-            tokens.add(st)
-    for s in re.split(r"[,;]", programnew_str or ""):
-        st = s.strip()
-        if st:
-            tokens.add(st)
+    @property
+    def branches(self) -> frozenset[CanonicalBranch]:
+        if self.organization_reason:
+            return frozenset()
+        return self.primary.branches | self.secondary.branches
 
-    for branch, patterns in CANONICAL_TO_TPO_STRINGS.items():
-        for pattern in patterns:
-            pattern_lower = pattern.lower()
-            # 1. Exact token match (primary and strict)
-            if any(pattern_lower == token.lower() for token in tokens):
-                eligible.add(branch)
-                break
-            # 2. Strict boundary match within combined text: ensure pattern is not followed by a specialization in parentheses
-            esc = re.escape(pattern_lower)
-            if re.search(r'(?<![a-zA-Z0-9])' + esc + r'(?!\s*[\(\/a-zA-Z0-9])', combined_text.lower()):
-                eligible.add(branch)
-                break
+    @property
+    def fields_disagree(self) -> bool:
+        return self.primary != self.secondary
 
-    # Log unknown VIT programs for audit and future additions
-    for token in tokens:
-        if token.startswith("VIT-") and token != "VIT-null":
-            is_recognized = False
-            for patterns in CANONICAL_TO_TPO_STRINGS.values():
-                if any(token.lower() == p.lower() for p in patterns):
-                    is_recognized = True
-                    break
-            if not is_recognized:
-                logger.warning(f"Unrecognized VIT program observed in TPO payload: '{token}'. Requires review.")
 
-    return eligible
+def parse_programme_field(value: Optional[str]) -> ProgrammeEvidence:
+    field = tokenize_programmes(value)
+    if field.malformed:
+        return ProgrammeEvidence(frozenset(), ("MALFORMED_SEGMENTATION",))
+    # Generic catalogue entries are historical evidence, never attribution.
+    qualified = {normalize_token(alias): branch
+                 for branch, aliases in CANONICAL_TO_TPO_STRINGS.items()
+                 for alias in aliases if alias.startswith("VIT-")}
+    qualified.update({normalize_token(branch.value): branch for branch in CanonicalBranch})
+    branches, reasons = set(), []
+    for token in field.tokens:
+        if token in qualified:
+            branches.add(qualified[token])
+        elif token.startswith(("viit-", "vu-", "unknown-")):
+            reasons.append("FOREIGN_OR_UNKNOWN_INSTITUTE")
+        elif token.startswith(("vit-", "vit_")):
+            reasons.append("UNSUPPORTED_VIT_PROGRAMME")
+        else:
+            reasons.append("UNPROVEN_INSTITUTE_ATTRIBUTION")
+    return ProgrammeEvidence(frozenset(branches), tuple(reasons))
+
+
+def explain_eligible_canonical_branches(tpoprogram_str: Optional[str], programnew_str: Optional[str],
+                                      organization_str: Optional[str] = None) -> EligibilityEvidence:
+    organization = normalize_organizations(organization_str)
+    reason = ("ORGANIZATION_UNRESOLVED" if organization.malformed or not organization.tokens
+              else "ORGANIZATION_EXCLUDES_VIT" if "vit" not in organization.tokens else None)
+    return EligibilityEvidence(parse_programme_field(tpoprogram_str),
+                               parse_programme_field(programnew_str), reason)
+
+
+def extract_eligible_canonical_branches(tpoprogram_str: Optional[str], programnew_str: Optional[str],
+                                       organization_str: Optional[str] = None) -> Set[CanonicalBranch]:
+    evidence = explain_eligible_canonical_branches(tpoprogram_str, programnew_str, organization_str)
+    if evidence.primary.unresolved_reasons or evidence.secondary.unresolved_reasons or evidence.organization_reason:
+        logger.debug("Programme attribution unresolved: organization=%s primary=%s secondary=%s",
+                     evidence.organization_reason, evidence.primary.unresolved_reasons,
+                     evidence.secondary.unresolved_reasons)
+    return set(evidence.branches)

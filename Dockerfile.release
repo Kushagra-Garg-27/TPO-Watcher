@@ -1,0 +1,32 @@
+FROM node:24.11.0-bookworm-slim@sha256:0e5f9744e7d936536405761bb7bfedc61d9e8b4604aa34d0403a7f6c3e5a98f0 AS web
+WORKDIR /build/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run lint && npm run build
+
+FROM python:3.12.10-slim-bookworm@sha256:79082fdf411b897d64983893f44e8e1908e21cade2fc5a794d4f46de76c85275 AS runtime
+ARG TARGETARCH
+RUN test "$TARGETARCH" = arm64
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+COPY requirements-linux-arm64.lock ./
+RUN python -m pip install --no-cache-dir --no-compile --only-binary=:all: --require-hashes -r requirements-linux-arm64.lock && python -m pip check
+RUN python -m playwright install --with-deps chromium && chmod -R a+rX /opt/playwright
+COPY app/ ./app/
+COPY --from=web /build/app/static/ ./app/static/
+USER 10001:10001
+EXPOSE 8000
+ENTRYPOINT ["python", "-B", "-m", "app.production_entrypoint"]
+CMD ["--config", "/run/tpo/runtime.json"]
+ARG SOURCE_MANIFEST_SHA256=unreviewed
+LABEL org.opencontainers.image.source="https://github.com/Kushagra-Garg-27/TPO-Watcher" \
+      org.opencontainers.image.description="Explicit v2 runtime; no-send unless separately authorized" \
+      org.opencontainers.image.source-manifest-sha256="${SOURCE_MANIFEST_SHA256}"
+
+# Disposable guarded verification only; never the production service target.
+FROM runtime AS verification
+COPY tests/ ./tests/
+COPY pytest.ini ./
+ENTRYPOINT ["python", "-I", "-B", "tests/isolation_bootstrap.py"]
+CMD ["--self-test"]

@@ -6,16 +6,32 @@ from typing import List, Optional
 from app.config import settings
 from app.tpo.models import CompanyRecord
 from app.notifications.base import NotificationProvider
+from app.notifications.transport_protocol import MailOutcome
 
 from app.notifications.utils import escape_html, render_safe_link
 
 logger = logging.getLogger(__name__)
 
 class EmailNotificationProvider(NotificationProvider):
+    def __init__(self,*,transport=None):
+        if transport is not None:
+            from app.notifications.transport_arbiter import AuthorityGateway
+            from app.monitoring.production_runtime import ProductionAccountGateway
+            if not isinstance(transport,(AuthorityGateway,ProductionAccountGateway)):raise ValueError("explicit gated mail adapter required")
+        self.transport=transport
+
     def _send_email(self, subject: str, html_content: str) -> bool:
         return self._send_email_to(settings.EMAIL_TO, subject, html_content)
 
-    def _send_email_to(self, to_email: str, subject: str, html_content: str, extra_headers: Optional[dict] = None) -> bool:
+    def _send_email_to(self, to_email: str, subject: str, html_content: str, extra_headers: Optional[dict] = None, *, expires_ms=None) -> bool | MailOutcome:
+        from app.monitoring.runtime_supervisor import current_runtime
+        from app.database.event_repository import PolicyDenied
+        if self.transport is None and current_runtime() is not None:
+            raise PolicyDenied('guarded runtime excludes direct SMTP')
+        if self.transport is not None:
+            if extra_headers:raise ValueError("subscriber messages require a durable authorized delivery")
+            if expires_ms is None:raise ValueError("finite ACCOUNT request expiry required")
+            return self.transport.send_account(to_email,subject,html_content,expires_ms)
         if not settings.SMTP_HOST or not settings.SMTP_USERNAME or not to_email:
             logger.warning("Email configuration or recipient missing. Skipping email notification.")
             return False
@@ -43,7 +59,8 @@ class EmailNotificationProvider(NotificationProvider):
             logger.error(f"Failed to send email to {to_email}: {e}")
             return False
 
-    def send_new_company_notification(self, company: CompanyRecord, target_match: bool) -> bool:
+    def send_new_company_notification(self, company: CompanyRecord, target_match: bool) -> bool | MailOutcome:
+        if self.transport is not None:return self.transport.send_admin(company.id)
         subject = f"🚨 NEW VIT TPO COMPANY: {company.company}"
         
         match_str = "YES" if target_match else "NO"
@@ -103,7 +120,8 @@ class EmailNotificationProvider(NotificationProvider):
         
         return self._send_email(subject, html)
 
-    def send_update_notification(self, company: CompanyRecord, changes: List[str]) -> bool:
+    def send_update_notification(self, company: CompanyRecord, changes: List[str]) -> bool | MailOutcome:
+        if self.transport is not None:return self.transport.send_admin(company.id)
         subject = f"⚠️ VIT TPO OPPORTUNITY UPDATED: {company.company}"
         
         company_name = escape_html(company.company)

@@ -1,8 +1,11 @@
 import logging
+import json
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 from app.tpo.models import CompanyRecord
 from app.database.repository import DatabaseRepository
+from app.tpo.normalization import registration_values, normalize_organizations, tokenize_programmes
+from app.subscribers.canonical import extract_eligible_canonical_branches
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +68,13 @@ class CompanyDetector:
         return result
 
     def _get_meaningful_changes(self, existing: dict, new_record: CompanyRecord) -> List[str]:
+        return self.meaningful_changes(existing, new_record)
+
+    @staticmethod
+    def meaningful_changes(existing: dict, new_record: CompanyRecord) -> List[str]:
         changes = []
         
         fields_to_check = [
-            ("registration_start", new_record.regStartdate, "Registration Start"),
-            ("registration_end", new_record.regEnddate, "Registration End"),
             ("max_package", new_record.maxPackage, "Max Package"),
             ("min_package", new_record.minPackage, "Min Package"),
             ("placement_type", new_record.placementtype, "Placement Type"),
@@ -84,10 +89,58 @@ class CompanyDetector:
             if old_val_str != new_val_str and not (old_val_str == "None" and new_val_str == ""):
                 changes.append(f"{readable_name}: '{old_val_str}' -> '{new_val_str}'")
                 
-        old_programs = str(existing.get("eligible_programs", "")).strip()
-        new_programs = str(new_record.tpoprogram or new_record.programnew or "").strip()
-        
-        if old_programs != new_programs and not (old_programs == "None" and new_programs == ""):
-            changes.append(f"Eligible Programs changed.")
-            
+        # Full source history carries the independent time and programme fields.
+        # Missing/corrupt history is unavailable, not an invented empty payload.
+        try:
+            previous = json.loads(existing.get("raw_data_json") or "{}")
+        except (ValueError, TypeError, RecursionError):
+            previous = {}
+        if not isinstance(previous, dict):
+            previous = {}
+        previous = dict(previous)
+        for source_key, column in (("regStartdate", "registration_start"),
+                                   ("regEnddate", "registration_end"),
+                                   ("organization", "organizations")):
+            if source_key not in previous and column in existing:
+                previous[source_key] = existing[column]
+        current = new_record.model_dump()
+        old_registration = registration_values(previous)
+        new_registration = registration_values(current)
+        for key, old in old_registration.items():
+            if old.signature != new_registration[key].signature:
+                changes.append(f"Registration field {key} changed.")
+
+        for key, normalizer in (("organization", normalize_organizations),
+                                ("tpoprogram", tokenize_programmes),
+                                ("programnew", tokenize_programmes)):
+            if key in previous and normalizer(previous[key]).signature != normalizer(current[key]).signature:
+                changes.append(f"Routing field {key} changed.")
+
+        if not all(key in previous for key in ("tpoprogram", "programnew")):
+            # Legacy eligible_programs lost which field supplied it. Compare
+            # only the available combined evidence, never infer that provenance.
+            if "eligible_programs" in existing:
+                projection = existing["eligible_programs"]
+                # A known nonempty primary determines the original repository
+                # projection. A disagreeing legacy column cannot override it.
+                if previous.get("tpoprogram"):
+                    projection = previous["tpoprogram"]
+                # An empty column cannot establish empty routing when a known
+                # nonempty secondary survives. Keep that direct evidence;
+                # Keep the independent secondary evidence; do not invent the
+                # unavailable primary or a historical combined value.
+                projection_missing = projection is None or (isinstance(projection, str) and not projection.strip())
+                reliable = not (projection_missing and previous.get("programnew"))
+                old_programs = tokenize_programmes(projection)
+                new_programs = tokenize_programmes(new_record.tpoprogram or new_record.programnew)
+                if reliable and old_programs.signature != new_programs.signature:
+                    changes.append("Eligible Programs changed.")
+        if all(key in previous for key in ("organization", "tpoprogram", "programnew")):
+            old_branches = extract_eligible_canonical_branches(previous["tpoprogram"], previous["programnew"],
+                                                             previous["organization"])
+            new_branches = extract_eligible_canonical_branches(new_record.tpoprogram, new_record.programnew,
+                                                             new_record.organization)
+            if old_branches != new_branches:
+                changes.append("Institution-qualified programme set changed.")
+
         return changes

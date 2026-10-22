@@ -15,6 +15,7 @@ from app.api.rate_limiter import check_rate_limit, get_client_ip
 from app.api.security_utils import is_valid_token_format, get_token_fingerprint
 from app.api.session import revoke_session_token, perform_logout
 from app.api.web_views import spa_response
+from app.database.notification_compatibility import repository_factory, repository_unit, account_request_response
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +23,7 @@ router = APIRouter(prefix="/api/v1", tags=["Authentication & Subscription"])
 
 def get_db_repos():
     from app.database.repository import DB_PATH
-    from app.database.sqlite_repository import SQLiteUserRepository, SQLiteTokenRepository
-    return SQLiteUserRepository(DB_PATH), SQLiteTokenRepository(DB_PATH)
+    return repository_factory(DB_PATH)
 
 @router.post("/auth/signup", status_code=status.HTTP_201_CREATED)
 def signup(
@@ -42,7 +42,7 @@ def signup(
     )
     check_rate_limit(
         request=request,
-        key=f"signup:email:{payload.email.lower()}",
+        key=f"signup:email:{hashlib.sha256(payload.email.lower().encode('utf-8')).hexdigest()}",
         max_requests=getattr(settings, "RATE_LIMIT_SIGNUP_PER_EMAIL", 5),
         window_seconds=900,
         detail="Too many signup attempts for this email address. Please try again later."
@@ -66,74 +66,46 @@ def signup(
             detail=f"Invalid branch '{payload.branch_canonical}'. Must be a recognized canonical VIT program."
         )
 
-    # 3. Check existing user
-    existing = user_repo.get_by_email(payload.email)
-    if existing:
-        if existing["is_verified"] == 1:
-            # User is already verified.
-            # Security Hardening: Normalize response to prevent email enumeration.
-            # Invalidate older preference tokens and dispatch a fresh 15-minute preference access link
-            # directly to the student's email inbox so legitimate users can manage preferences.
-            token_repo.invalidate_user_tokens(existing["id"], "MANAGE_PREFS")
+    # Identity/preferences, supersession and the new token commit together.
+    with repository_unit(repos):
+        existing = user_repo.get_by_email(payload.email)
+        verified = existing is not None and existing["is_verified"] == 1
+        if existing:
+            user_id = existing["id"]
+            if not verified:
+                user_repo.update_preferences(user_id, payload.pref_internship, payload.pref_placement, payload.pref_ppo)
+        else:
+            user_id = user_repo.create_user(payload.email, 2028, payload.branch_canonical,
+                payload.pref_internship, payload.pref_placement, payload.pref_ppo)
+        from app.database.account_schema import account_policy_enabled
+        production = False
+        allowed = True
+        if hasattr(user_repo, "_get_conn"):
+            with user_repo._get_conn() as connection:
+                production = account_policy_enabled(connection)
+                if production:
+                    from app.auth.accounts import AccountService
+                    allowed = AccountService(connection)._account(user_id)["account_state"] == "ACTIVE"
+        kind = ("ACCOUNT_LOGIN" if production else "MANAGE_PREFS") if verified else "SIGNUP_VERIFY"
+        raw_token = None
+        if allowed:
+            token_repo.invalidate_user_tokens(user_id, kind)
             raw_token = secrets.token_urlsafe(32)
             token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-            expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
-            token_repo.create_token(
-                user_id=existing["id"],
-                token_hash=token_hash,
-                token_type="MANAGE_PREFS",
-                expires_at=expires_at
-            )
-            email_service.send_preference_link_email(payload.email, raw_token)
-            logger.info(f"Existing verified user signup received; preference link dispatched. Fingerprint: {token_hash[:8]}")
-            return {
-                "status": "success",
-                "message": "Verification link sent! Please check your email and click the link to activate notifications or manage preferences."
-            }
-        else:
-            user_id = existing["id"]
-            # Update preferences and branch if changed before verification
-            user_repo.update_preferences(
-                user_id=user_id,
-                pref_internship=payload.pref_internship,
-                pref_placement=payload.pref_placement,
-                pref_ppo=payload.pref_ppo
-            )
-            # Invalidate any older signup tokens (supersession)
-            token_repo.invalidate_user_tokens(user_id, "SIGNUP_VERIFY")
-    else:
-        # Create new unverified user
-        user_id = user_repo.create_user(
-            email=payload.email,
-            graduation_year=2028,
-            branch_canonical=payload.branch_canonical,
-            pref_internship=payload.pref_internship,
-            pref_placement=payload.pref_placement,
-            pref_ppo=payload.pref_ppo
-        )
+            token_repo.create_token(user_id, token_hash, kind,
+                datetime.now(timezone.utc) + (timedelta(minutes=15) if verified else timedelta(hours=24)))
 
-    # 4. Generate 24-hour verification token with 256 bits of CSPRNG entropy
-    raw_token = secrets.token_urlsafe(32)
-    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
-    token_repo.create_token(
-        user_id=user_id,
-        token_hash=token_hash,
-        token_type="SIGNUP_VERIFY",
-        expires_at=expires_at
-    )
-
-    # 5. Dispatch verification email
-    sent = email_service.send_verification_email(payload.email, raw_token)
-    if not sent:
-        logger.warning(f"Could not deliver verification email to {payload.email}.")
-    else:
-        logger.info(f"Verification email dispatched for user {user_id}. Fingerprint: {token_hash[:8]}")
-
-    return {
-        "status": "success",
-        "message": "Verification link sent! Please check your email and click the link within 24 hours to activate notifications."
-    }
+    # External transport starts only after the identity unit commits. A failure
+    # or ambiguous outcome cannot alter the public account-existence contract.
+    try:
+        send = email_service.send_preference_link_email if verified else email_service.send_verification_email
+        if raw_token is not None:
+            send(payload.email, raw_token)
+    except Exception:
+        logger.warning("Account-link request could not complete transport processing.")
+    legacy = ("Verification link sent! Please check your email and click the link to activate notifications or manage preferences."
+        if verified else "Verification link sent! Please check your email and click the link within 24 hours to activate notifications.")
+    return account_request_response(repos, legacy)
 
 @router.post("/auth/verify/confirm")
 def verify_email_confirm(
@@ -177,7 +149,7 @@ def verify_email_confirm(
 
     return {
         "status": "success",
-        "message": "Email verified successfully! You will now receive verified TPO alerts."
+        "message": "Email ownership verified. Enrollment review, notification destination verification, and consent are required before production alerts."
     }
 
 
@@ -398,11 +370,12 @@ def unsubscribe_one_click_get():
 @router.post("/auth/logout")
 def logout(
     response: Response,
-    request: Request
+    request: Request,
+    repos = Depends(get_db_repos)
 ):
     """
     Canonical session logout endpoint:
     1. Revokes the session token server-side.
     2. Clears the HttpOnly session cookie on the client.
     """
-    return perform_logout(request, response)
+    return perform_logout(request, response, repos=repos)

@@ -1,0 +1,58 @@
+# Standalone replacement for the existing watcher service, after approved
+# maintenance and legacy restart exclusion. Do not combine with legacy compose.
+name: tpo-watcher
+services:
+  watcher:
+    image: ${TPO_RELEASE_IMAGE:?exact reviewed image digest required}
+    platform: linux/arm64
+    container_name: tpo-watcher
+    restart: "no"
+    init: true
+    user: "${TPO_RUNTIME_UID:?verified data-volume owner required}:${TPO_RUNTIME_GID:?verified data-volume group required}"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 192
+    mem_limit: 1200m
+    shm_size: 256m
+    stop_grace_period: 90s
+    ports: ["127.0.0.1:8000:8000"]
+    environment:
+      DB_PATH: /var/lib/tpo/watcher.sqlite
+      STATE_FILE: /run/tpo-browser/state.json
+    volumes:
+      - watcher_data:/var/lib/tpo
+      - type: bind
+        source: ${TPO_RUNTIME_CONFIG_DIR:?owner-installed configuration directory required}
+        target: /run/tpo
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${TPO_VAULT_DIR:?external protected custody directory required}
+        target: /run/tpo-vault
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${TPO_CHECKPOINT_DIR:?independent protected checkpoint directory required}
+        target: /run/tpo-checkpoint
+        bind: {create_host_path: false}
+    tmpfs:
+      - /tmp:rw,nosuid,size=134217728,mode=1777
+      - /run/tpo-browser:rw,nosuid,noexec,size=16777216,mode=0700,uid=${TPO_RUNTIME_UID},gid=${TPO_RUNTIME_GID}
+    networks: [existing]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    healthcheck:
+      test: ["CMD", "python", "-I", "-B", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=2)); assert d.get('status')=='guarded' and d.get('notification',{}).get('runtime_available') is True"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+volumes:
+  watcher_data:
+    external: true
+    name: ${TPO_DATA_VOLUME:?verified existing SQLite volume required}
+networks:
+  existing:
+    external: true
+    name: ${TPO_EXISTING_NETWORK:?verified network shared with existing Caddy required}

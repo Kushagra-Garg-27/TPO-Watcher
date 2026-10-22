@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "public_origin": "https://tpowatcher.duckdns.org",
+  "database": "/var/lib/tpo/watcher.sqlite",
+  "database_sha256": "REPLACE_WITH_VERIFIED_CURRENT_MAIN_FILE_SHA256",
+  "vault": "/run/tpo-vault/vault.bin",
+  "checkpoints": "/run/tpo-checkpoint/checkpoints.sqlite",
+  "wrapping_keys": {"1": "/run/tpo/secrets/wrapping-key-generation-1"},
+  "active_generation": 1,
+  "source_authorization": {
+    "identity": "REPLACE_WITH_APPROVED_OPERATOR_IDENTITY",
+    "evidence_reference": "REPLACE_WITH_SOURCE_ACCESS_APPROVAL"
+  },
+  "listing_contract": {
+    "source_namespace": "vierp",
+    "institution": "VIT",
+    "cohort": 2028,
+    "evidence_reference": "REPLACE_WITH_VERIFIED_SOURCE_SCOPE_REFERENCE",
+    "freshness_ms": 60000,
+    "allow_complete": false,
+    "source_timezone": null,
+    "source_timezone_evidence": null
+  },
+  "legacy_shutdown": {
+    "reference": "REPLACE_WITH_VERIFIED_LEGACY_EXCLUSION_EVIDENCE",
+    "writer": false,
+    "subscriber": false,
+    "admin": false,
+    "account": false
+  },
+  "auth_username_file": "/run/tpo/secrets/source-username",
+  "auth_password_file": "/run/tpo/secrets/source-password",
+  "session_state": "/run/tpo-browser/state.json",
+  "session_secret_file": "/run/tpo/secrets/web-session-secret",
+  "pilot": null,
+  "smtp": null,
+  "runtime": {"info_ttl_ms": 60000, "idle_wait_ms": 1000, "action_base": "https://tpowatcher.duckdns.org"},
+  "poll_interval_ms": 60000,
+  "public_host": "0.0.0.0",
+  "public_port": 8000
+}
