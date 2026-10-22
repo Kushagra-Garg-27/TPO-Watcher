@@ -2,7 +2,10 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { createGzip, createGunzip } from 'node:zlib'
+import { Transform, Writable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex')
@@ -37,6 +40,7 @@ write('source.json',{commit:git(['rev-parse','HEAD']).trim(),canonical,files:man
 const run = (label, cmd, args) => {
   const r = spawnSync(cmd,args,{cwd:root,encoding:'utf8',maxBuffer:32*1024*1024,timeout:45*60*1000})
   fs.writeFileSync(path.join(out,label+'.log'),(r.stdout||'')+(r.stderr||''))
+  console.log(label+': '+(r.status===0?'PASS':'FAIL'))
   if(r.status!==0) throw Error(label+' failed; see retained evidence')
   return r.stdout.trim()
 }
@@ -79,12 +83,30 @@ const nativeTests=[
 ]
 const native=run('native-linux','docker',[...base,verification,'--pytest','-v','--tb=short',...nativeTests])
 if(/\bSKIPPED\b|\bskipped\b/.test(native) || !/2 passed/.test(native)) throw Error('Native cases must execute and pass')
-run('save-runtime','docker',['save','-o',path.join(out,'runtime.docker.tar'),tag])
-// Stream large archive hashes without buffering the image in Node's heap.
-const archiveHash=await new Promise((resolve,reject)=>{const h=crypto.createHash('sha256');const s=fs.createReadStream(path.join(out,'runtime.docker.tar'));s.on('data',b=>h.update(b));s.on('end',()=>resolve(h.digest('hex')));s.on('error',reject)})
 const metadata=JSON.parse(fs.readFileSync(path.join(out,'build-metadata.json'),'utf8'))
 if(!/^sha256:[a-f0-9]{64}$/.test(metadata['containerimage.digest']||'')) throw Error('Build manifest digest absent')
-write('acceptance.json',{passed:true,canonical,image_id:image.Id,build_manifest_digest:metadata['containerimage.digest'],
-  registry_digest:null,archive_sha256:archiveHash,modules,nativeTests,
-  scope:'Fictional guarded startup/health/restart/recovery plus native Chromium; no live source, SMTP or production deployment'})
+const acceptance={native_tests_passed:true,canonical,image_id:image.Id,build_manifest_digest:metadata['containerimage.digest'],
+  registry_digest:null,archive_verified:false,transferable_image_available:false,modules,nativeTests,
+  scope:'Fictional guarded startup/health/restart/recovery plus native Chromium; no live source, SMTP or production deployment'}
+write('acceptance.json',acceptance)
+// Stream Docker output directly through gzip: no multi-GB uncompressed disk copy.
+const archive=path.join(out,'runtime.docker.tar.gz'), rawHash=crypto.createHash('sha256')
+const hashThrough=h=>new Transform({transform(chunk,encoding,callback){h.update(chunk);callback(null,chunk)}})
+const child=spawn('docker',['save',tag],{cwd:root,stdio:['ignore','pipe','pipe'],timeout:45*60*1000})
+child.stderr.pipe(fs.createWriteStream(path.join(out,'save-runtime.log')))
+const exited=new Promise((resolve,reject)=>{
+  child.once('error',reject)
+  child.once('close',(code,signal)=>code===0?resolve():reject(Error('Docker save failed: '+(signal||code))))
+})
+try {
+  await Promise.all([exited,pipeline(child.stdout,hashThrough(rawHash),createGzip({level:9}),fs.createWriteStream(archive,{flags:'wx'}))])
+} catch(error) { child.kill();throw error }
+const rawSha=rawHash.digest('hex'), compressedHash=crypto.createHash('sha256'), restoredHash=crypto.createHash('sha256')
+// Gunzip validates its CRC; the restored tar must also match the exact saved stream.
+await pipeline(fs.createReadStream(archive),hashThrough(compressedHash),createGunzip(),
+  new Writable({write(chunk,encoding,callback){restoredHash.update(chunk);callback()}}))
+if(restoredHash.digest('hex')!==rawSha) throw Error('Compressed image round-trip checksum mismatch')
+write('acceptance.json',{...acceptance,archive_verified:true,archive_name:'runtime.docker.tar.gz',
+  archive_sha256:compressedHash.digest('hex'),uncompressed_tar_sha256:rawSha,archive_bytes:fs.statSync(archive).size,
+  transfer_status:'Upload availability is decided separately by the storage gate and upload result'})
 console.log('Native acceptance evidence: '+out)
