@@ -83,7 +83,13 @@ jobs:
               require(digest(stream) == 'sha256:' + acceptance['uncompressed_tar_sha256'], 'archive round trip')
           # No extraction onto the host. Scan deleted/overwritten files in ALL layers too.
           sensitive_path = re.compile(r'(^|/)(\.env(?:\..*)?|\.git|\.aws|\.ssh|\.auth|secrets?|credentials|storageState[^/]*|[^/]*playwright[_-]state[^/]*)(/|$)|\.(sqlite[^/]*|db|pem|key|p12|pfx)$', re.I)
-          secret = re.compile(rb'-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----[\r\n]+[A-Za-z0-9+/=\r\n]{64,}|(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{60,}|AKIA[A-Z0-9]{16}|ASIA[A-Z0-9]{16})')
+          # AWS access-key IDs are 20-character tokens, not slices of longer ASCII identifiers.
+          secret = re.compile(rb'-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----[\r\n]+[A-Za-z0-9+/=\r\n]{64,}|(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{60,})|(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9_])')
+          def reject_content(name, offset, signature, layer_diff):
+              # Evidence only: never print matched bytes, credentials or file contents.
+              print(json.dumps({'image_audit_rejection': {'path': name[:256], 'byte_offset': offset,
+                    'signature': signature, 'layer_diff_id': layer_diff}}, ensure_ascii=True), flush=True)
+              require(False, 'secret/database content')
           counts = {'layers': 0, 'files_scanned': 0, 'bytes_scanned': 0, 'source_files_matched': 0}
           matched = set()
           with tarfile.open(archive, 'r:gz') as outer:
@@ -130,15 +136,27 @@ jobs:
                           file_hash = hashlib.sha256()
                           with layer.extractfile(member) as stream:
                               carry = b''
-                              first_chunk = True
-                              for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                              offset = 0
+                              chunk = stream.read(1024 * 1024)
+                              while chunk:
+                                  following = stream.read(1024 * 1024)
                                   # SQLite libraries contain the magic string internally; databases start with it.
-                                  require(not (first_chunk and chunk.startswith(b'SQLite format 3\x00')), 'secret/database content')
-                                  first_chunk = False
-                                  require(not secret.search(carry + chunk), 'secret/database content')
+                                  if offset == 0 and chunk.startswith(b'SQLite format 3\x00'):
+                                      reject_content(name, 0, 'sqlite-header', expected_diff)
+                                  # Real following bytes prevent a chunk edge from becoming a fake token boundary.
+                                  scan = carry + chunk + following[:128]
+                                  for finding in secret.finditer(scan):
+                                      if finding.start() >= len(carry) + len(chunk):
+                                          continue  # Starts in lookahead; the next iteration checks it fully.
+                                      if finding.start() == 0 and offset > len(carry):
+                                          continue  # Overlap edge was checked with its real predecessor already.
+                                      kind = 'private-key' if finding.group().startswith(b'-----') else 'credential-token'
+                                      reject_content(name, offset - len(carry) + finding.start(), kind, expected_diff)
                                   file_hash.update(chunk)
                                   carry = (carry + chunk)[-8192:]
                                   counts['bytes_scanned'] += len(chunk)
+                                  offset += len(chunk)
+                                  chunk = following
                           if name.startswith('app/app/') and not name.startswith('app/app/static/'):
                               require(file_hash.hexdigest() == expected[name[4:]], 'application source substitution')
                               matched.add(name[4:])
