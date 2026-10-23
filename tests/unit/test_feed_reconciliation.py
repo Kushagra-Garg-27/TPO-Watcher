@@ -233,3 +233,26 @@ def test_reconciliation_test_h_null_records_not_activated(repo, detector):
     assert record["is_active"] is None
     assert "5610" not in result.deactivated_companies
     assert repo.get_company("1")["is_active"] == "True"
+
+
+def test_reconciliation_absent_or_unknown_portal_status_not_treated_as_inactive(repo, detector):
+    """
+    G04 Reassessment: An absent (None) or unknown portal status in an incomplete
+    portal response must NOT be treated as confirmed inactive.
+    It must preserve the existing active status and not emit false deactivation updates.
+    """
+    comp_a = _create_record("10", "Active Corp", is_active="True")
+    detector.process_fetched_companies([comp_a])
+    assert repo.get_company("10")["is_active"] == "True"
+
+    # Simulate subsequent incomplete portal response where isactive is None
+    comp_a_incomplete = _create_record("10", "Active Corp", is_active=None)
+    result = detector.process_fetched_companies([comp_a_incomplete])
+
+    # Must NOT report an active status change
+    assert not any("Active Status" in ch for c, ch_list in result.updated_companies for ch in ch_list)
+    # Must NOT be deactivated
+    assert "10" not in result.deactivated_companies
+    # Must preserve existing active status in repository
+    assert repo.get_company("10")["is_active"] == "True"
+

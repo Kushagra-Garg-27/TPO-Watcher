@@ -74,9 +74,12 @@ def test_cache_control_spa_shell_policy():
         assert res.headers.get("cache-control") == "no-store", f"Failed on {path}"
 
     # 3. Hashed assets and static files must not have their cache policy overwritten
-    for asset_path in ["/favicon.svg", "/assets/index-BdLrdtJB.css"]:
+    from app.api.app import STATIC_DIR
+    css_assets = list((STATIC_DIR / "assets").glob("*.css"))
+    css_path = f"/assets/{css_assets[0].name}" if css_assets else "/assets/index-BdLrdtJB.css"
+    for asset_path in ["/favicon.svg", css_path]:
         res = client.get(asset_path)
-        assert res.status_code == 200
+        assert res.status_code == 200, f"Expected 200 for {asset_path}, got {res.status_code}"
         assert res.headers.get("cache-control") != "no-cache, must-revalidate", f"Failed on {asset_path}"
         assert res.headers.get("cache-control") != "no-store", f"Failed on {asset_path}"
 

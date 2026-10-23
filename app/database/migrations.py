@@ -94,5 +94,11 @@ def run_migrations(db_path: str) -> None:
             ON notification_deliveries(status, lease_expires_at);
         """)
 
+        # Migration: add raw_data_snapshot column for event-time delivery fidelity (F11)
+        try:
+            conn.execute("ALTER TABLE notification_deliveries ADD COLUMN raw_data_snapshot TEXT")
+        except Exception:
+            pass  # column already exists (safe re-run)
+
         conn.commit()
     logger.info("Database migrations applied successfully.")

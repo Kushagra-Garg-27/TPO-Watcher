@@ -13,9 +13,23 @@ class AuthenticationError(Exception):
     pass
 
 class TPOClient:
-    def __init__(self, context: BrowserContext, page: Optional[Page] = None):
+    def __init__(self, context: BrowserContext, page: Optional[Page] = None, *, listing_contract=None, clock=None):
         self.context = context
         self.page = page
+        self.listing_contract=listing_contract
+        self.clock=clock
+        self._listing_body=None
+
+    async def fetch_listing(self):
+        from app.tpo.listing import ListingContract,ListingPage,decode_listing_pages
+        if not isinstance(self.listing_contract,ListingContract) or not callable(self.clock):
+            raise ValueError("approved listing scope and explicit clock required")
+        await self.fetch_companies()
+        # This browser integration observes one dashboard response. It has no
+        # verified pagination/census contract and therefore cannot assert absence.
+        return decode_listing_pages([ListingPage(self._listing_body,1,1,
+            self.listing_contract.source_namespace,True)],contract=self.listing_contract,
+            observed_ms=self.clock(),complete=False)
 
     async def fetch_companies(self) -> List[CompanyRecord]:
         """
@@ -44,7 +58,7 @@ class TPOClient:
 
             logger.info("Initiating dashboard navigation and waiting for API response...")
             async with page.expect_response(
-                lambda res: "newschedulesdcopanies" in res.url,
+                lambda res: res.url.split("?",1)[0] == API_ENDPOINT,
                 timeout=35000
             ) as resp_info:
                 link = page.locator("a[href='/company-dashboard']").first
@@ -79,11 +93,14 @@ class TPOClient:
                 raise AuthenticationError(f"API authentication error: {err_msg}")
                 
             try:
+                from app.tpo.listing import validate_listing_body
+                validate_listing_body(data)
                 api_response = APIResponse(**data)
             except ValidationError as e:
                 logger.error("API schema validation failed.")
                 raise Exception(f"Unexpected API schema: {e}")
                 
+            self._listing_body=data
             logger.info(f"Successfully fetched {len(api_response.company_list)} companies.")
             try:
                 await page.goto("https://tpo.vierp.in/home", wait_until="domcontentloaded")

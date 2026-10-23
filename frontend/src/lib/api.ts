@@ -38,6 +38,29 @@ export interface Opportunity {
   company_type: string | null
   is_active: string | null
   first_seen_at: string | null
+  registration_start: string | null
+  registration_start_time: string | null
+  registration_end_time: string | null
+  registration_start_alternate: string | null
+  registration_end_alternate: string | null
+  deadline_timezone: string | null
+  compensation_unit: string | null
+  organizations: string | null
+  job_title: string | null
+  job_description: string | null
+  academic_year: string | null
+  eligibility_status: 'PROGRAMME_MATCH_ONLY'
+  listing_status: 'CURRENT'
+  observed_ms: number
+  valid_until_ms: number
+}
+
+export interface OpportunityListing {
+  items: Opportunity[]
+  total: number
+  shown: number
+  status: 'VERIFIED' | 'STALE' | 'UNVERIFIED'
+  observed_ms: number | null
 }
 
 export interface ApiResult<T = null> {
@@ -45,6 +68,38 @@ export interface ApiResult<T = null> {
   data?: T
   error?: string
   status?: number
+}
+
+function isOpportunityListing(value: unknown): value is OpportunityListing {
+  if (typeof value !== 'object' || value === null) return false
+  const data = value as Record<string, unknown>
+  const timestamp = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0
+  if (!Array.isArray(data.items) || data.items.length > 5 ||
+      !timestamp(data.total) || data.total < data.items.length || data.shown !== data.items.length ||
+      typeof data.status !== 'string' || !['VERIFIED', 'STALE', 'UNVERIFIED'].includes(data.status) ||
+      !(data.observed_ms === null || timestamp(data.observed_ms))) return false
+  if (data.items.length > 0 && data.status !== 'VERIFIED') return false
+  if (data.status !== 'UNVERIFIED' && data.observed_ms === null) return false
+  const ids = new Set<string>()
+  const nullableFields = ['max_package', 'min_package', 'placement_type', 'registration_end',
+    'eligible_programs', 'company_type', 'first_seen_at', 'registration_start',
+    'registration_start_time', 'registration_end_time', 'registration_start_alternate',
+    'registration_end_alternate', 'deadline_timezone', 'compensation_unit', 'organizations',
+    'job_title', 'job_description', 'academic_year']
+  return data.items.every((value: unknown) => {
+    if (typeof value !== 'object' || value === null) return false
+    const item = value as Record<string, unknown>
+    if (typeof item.id !== 'string' || !item.id.trim() || ids.has(item.id) ||
+        typeof item.company !== 'string' || !item.company.trim() ||
+        typeof item.is_active !== 'string' || item.is_active.trim().toLowerCase() !== 'true' ||
+        item.listing_status !== 'CURRENT' || item.eligibility_status !== 'PROGRAMME_MATCH_ONLY' ||
+        !timestamp(item.observed_ms) || !timestamp(item.valid_until_ms) ||
+        item.valid_until_ms < item.observed_ms ||
+        data.observed_ms === null || (data.observed_ms as number) < item.observed_ms ||
+        !nullableFields.every(key => item[key] === null || typeof item[key] === 'string')) return false
+    ids.add(item.id)
+    return true
+  })
 }
 
 async function request<T>(
@@ -127,6 +182,15 @@ export const api = {
 
   async getOpportunities(): Promise<ApiResult<Opportunity[]>> {
     return request('/api/v1/opportunities')
+  },
+
+  async getOpportunityListing(): Promise<ApiResult<OpportunityListing>> {
+    const result = await request<unknown>('/api/v1/opportunity-listing')
+    if (!result.ok) return { ok: false, error: result.error, status: result.status }
+    if (!isOpportunityListing(result.data)) {
+      return { ok: false, error: 'Verified listing response is invalid.' }
+    }
+    return { ok: true, data: result.data }
   },
 
   async logout(): Promise<ApiResult<{ message: string; status: string }>> {

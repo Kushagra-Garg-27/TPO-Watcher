@@ -191,6 +191,30 @@ class DatabaseRepository:
                     return ", ".join(str(v) for v in val if v is not None)
                 return str(val)
 
+            def normalize_active_flag(val) -> str:
+                """G04: Always store a string sentinel ('True' or 'False') for is_active.
+                Python None or the literal string 'None' must never be
+                persisted as SQL NULL — that creates an unreconcilable orphan
+                (the deactivate_missing_companies guard only matches 'True').
+
+                If explicitly active ('true', '1', 'yes') -> 'True'.
+                If explicitly inactive ('false', '0', 'no') -> 'False'.
+                If absent or unknown:
+                  - If the company already exists in the database, preserve its existing is_active status.
+                  - If newly discovered in the active portal feed, default to 'True'.
+                An absent or unknown status must never be treated as a confirmed inactive status.
+                """
+                if val is not None:
+                    s = str(val).strip().lower()
+                    if s in ("true", "1", "yes"):
+                        return "True"
+                    if s in ("false", "0", "no"):
+                        return "False"
+                # Absent or unknown status from portal
+                if existing is not None and existing.get("is_active"):
+                    return str(existing["is_active"])
+                return "True"
+
             conn.execute("""
                 INSERT INTO companies (
                     id, company, company_code, registration_start, registration_end,
@@ -232,13 +256,14 @@ class DatabaseRepository:
                 to_str(record.skill),
                 to_str(record.tpoprogram or record.programnew),
                 to_str(record.organization),
-                to_str(record.isactive),
+                normalize_active_flag(record.isactive),  # G04: never store NULL
                 first_seen.isoformat() if isinstance(first_seen, datetime) else first_seen,
                 now.isoformat(),
                 last_notified,
                 raw_json
             ))
             conn.commit()
+
 
     def mark_notified(self, company_id: str):
         with self._get_conn() as conn:

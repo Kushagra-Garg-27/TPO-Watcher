@@ -6,16 +6,31 @@ from typing import List, Optional
 from app.config import settings
 from app.tpo.models import CompanyRecord
 from app.notifications.base import NotificationProvider
+from app.notifications.transport_protocol import MailOutcome
 
 from app.notifications.utils import escape_html, render_safe_link
 
 logger = logging.getLogger(__name__)
 
 class EmailNotificationProvider(NotificationProvider):
+    def __init__(self,*,transport=None):
+        if transport is not None:
+            from app.notifications.transport_arbiter import AuthorityGateway
+            if not isinstance(transport,AuthorityGateway):raise ValueError("explicit gated fictional adapter required")
+        self.transport=transport
+
     def _send_email(self, subject: str, html_content: str) -> bool:
         return self._send_email_to(settings.EMAIL_TO, subject, html_content)
 
-    def _send_email_to(self, to_email: str, subject: str, html_content: str, extra_headers: Optional[dict] = None) -> bool:
+    def _send_email_to(self, to_email: str, subject: str, html_content: str, extra_headers: Optional[dict] = None, *, expires_ms=None) -> bool | MailOutcome:
+        from app.monitoring.runtime_supervisor import current_runtime
+        from app.database.event_repository import PolicyDenied
+        if self.transport is None and current_runtime() is not None:
+            raise PolicyDenied('guarded runtime excludes direct SMTP')
+        if self.transport is not None:
+            if extra_headers:raise ValueError("subscriber messages require a durable authorized delivery")
+            if expires_ms is None:raise ValueError("finite ACCOUNT request expiry required")
+            return self.transport.send_account(to_email,subject,html_content,expires_ms)
         if not settings.SMTP_HOST or not settings.SMTP_USERNAME or not to_email:
             logger.warning("Email configuration or recipient missing. Skipping email notification.")
             return False
@@ -43,15 +58,33 @@ class EmailNotificationProvider(NotificationProvider):
             logger.error(f"Failed to send email to {to_email}: {e}")
             return False
 
-    def send_new_company_notification(self, company: CompanyRecord, target_match: bool) -> bool:
+    def send_new_company_notification(self, company: CompanyRecord, target_match: bool, event_at=None) -> bool | MailOutcome:
+        if self.transport is not None:return self.transport.send_admin(company.id)
         subject = f"🚨 NEW VIT TPO COMPANY: {company.company}"
         
         match_str = "YES" if target_match else "NO"
         programs = company.tpoprogram or company.programnew or "Not Specified"
         
         IST = timezone(timedelta(hours=5, minutes=30))
-        now_ist = datetime.now(IST)
-        detected_time = now_ist.strftime("%d-%b-%Y %H:%M:%S IST")
+        # F11: use event-time (first_seen_at / explicit event_at) not render-time.
+        # This ensures the email shows when the opportunity was first detected,
+        # not when the email was composed (which may be minutes later).
+        def _parse_event_at(val):
+            if val is None:
+                return None
+            if isinstance(val, datetime):
+                return val
+            try:
+                # ISO string from DB (e.g. "2026-10-13T11:30:00+00:00")
+                return datetime.fromisoformat(str(val))
+            except Exception:
+                return None
+
+        detected_dt = _parse_event_at(event_at) or datetime.now(IST)
+        if detected_dt.tzinfo is None:
+            detected_dt = detected_dt.replace(tzinfo=timezone.utc)
+        detected_time = detected_dt.astimezone(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+
         
         company_name = escape_html(company.company)
         company_code = escape_html(company.company_code or "N/A")
@@ -96,6 +129,12 @@ class EmailNotificationProvider(NotificationProvider):
             
             <p><strong>Detected:</strong> {detected_time_esc}</p>
             
+            <!-- F15: eligibility disclaimer for admin channel -->
+            <p style="font-style: italic; color: #555; font-size: 13px;">
+                Branch programme match does not confirm full eligibility. Please verify eligibility criteria
+                and application requirements on the official VIT TPO portal before any action.
+            </p>
+
             <p>{portal_button}</p>
         </body>
         </html>
@@ -103,7 +142,8 @@ class EmailNotificationProvider(NotificationProvider):
         
         return self._send_email(subject, html)
 
-    def send_update_notification(self, company: CompanyRecord, changes: List[str]) -> bool:
+    def send_update_notification(self, company: CompanyRecord, changes: List[str]) -> bool | MailOutcome:
+        if self.transport is not None:return self.transport.send_admin(company.id)
         subject = f"⚠️ VIT TPO OPPORTUNITY UPDATED: {company.company}"
         
         company_name = escape_html(company.company)

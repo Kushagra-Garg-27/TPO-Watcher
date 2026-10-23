@@ -4,7 +4,7 @@ import json
 import logging
 import secrets
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, List, Dict, Any
 
 from app.config import settings
 from app.database.interfaces import DeliveryRepositoryProtocol, TokenRepositoryProtocol
@@ -22,11 +22,18 @@ class DeliveryWorker:
         email_notifier: Optional[EmailNotificationProvider] = None,
         batch_size: int = 25,
         lease_seconds: int = 300,
-        send_interval_seconds: float = 1.5
+        send_interval_seconds: float = 1.5,
+        *, notification_pipeline=None
     ):
         self.delivery_repo = delivery_repo
         self.token_repo = token_repo
-        self.notifier = email_notifier or EmailNotificationProvider()
+        self.notification_pipeline = notification_pipeline
+        self.notifier = None if notification_pipeline is not None else email_notifier or EmailNotificationProvider()
+        from app.notifications.transport_arbiter import AuthorityGateway
+        if notification_pipeline is None and isinstance(getattr(self.notifier,"transport",None),AuthorityGateway):
+            raise ValueError("gated fictional subscriber transport requires explicit v2 pipeline")
+        self._v2_channel = "ADMIN"
+        self.last_v2_attempts = 0
         self.batch_size = batch_size
         self.lease_seconds = lease_seconds
         self.send_interval_seconds = send_interval_seconds
@@ -45,15 +52,28 @@ class DeliveryWorker:
         return raw_token
 
     def _format_opportunity_email(
-        self, 
-        company_record: CompanyRecord, 
-        notif_type: str, 
+        self,
+        company_record: CompanyRecord,
+        notif_type: str,
         user_branch: str,
         unsub_url: str,
-        pref_url: str
+        pref_url: str,
+        changes: Optional[List[str]] = None,
+        event_at: Optional[str] = None,  # F11: ISO timestamp of dispatch/detection event
     ) -> str:
+        # F11 (subscriber): use dispatch/event time (created_at from delivery row),
+        # not render time (datetime.now), for the 'Detected at' label.
         IST = timezone(timedelta(hours=5, minutes=30))
-        now_ist = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+        if event_at is not None:
+            try:
+                _dt = datetime.fromisoformat(str(event_at))
+                if _dt.tzinfo is None:
+                    _dt = _dt.replace(tzinfo=timezone.utc)
+                now_ist = _dt.astimezone(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+            except Exception:
+                now_ist = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+        else:
+            now_ist = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
 
         programs = company_record.tpoprogram or company_record.programnew or "Not Specified"
         header_color = "#d32f2f" if notif_type == "NEW" else "#f57c00"
@@ -63,6 +83,9 @@ class DeliveryWorker:
         company_code = escape_html(company_record.company_code or "N/A")
         placement_type = escape_html(company_record.placementtype or "N/A")
         internship_type = escape_html(company_record.internshiptype or "N/A")
+        # F03: Do not assert compensation unit (LPA / monthly / annual) from raw numeric
+        # magnitude alone — the portal does not expose reliable unit metadata.  Show the
+        # source value verbatim so subscribers can verify on the portal.
         max_pkg = escape_html(company_record.maxPackage or "N/A")
         min_pkg = escape_html(company_record.minPackage or "N/A")
         reg_start = escape_html(f"{company_record.regStartdate or 'N/A'} {company_record.regStarttime or ''}".strip())
@@ -79,6 +102,50 @@ class DeliveryWorker:
             "Open Official TPO Portal",
             style="background-color: #0366d6; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 6px; font-weight: bold; font-size: 15px; display: inline-block;"
         )
+
+        # F10/G09: For UPDATE emails, surface the changed fields and lifecycle status.
+        # The changes list may be absent (not persisted in the delivery row), so we
+        # also emit an explicit Active Status line from the snapshot isactive field.
+        if notif_type != "NEW":
+            active_raw = str(company_record.isactive or "").strip().lower()
+            if active_raw in ("true", "1", "yes"):
+                active_label = "True"
+                active_context = "Company Active"
+                status_line = (
+                    f"<li style='margin: 4px 0;'>"
+                    f"<strong>Active Status: {escape_html(active_label)}</strong>"
+                    f" ({escape_html(active_context)})</li>"
+                )
+            elif active_raw in ("false", "0", "no"):
+                active_label = "False"
+                active_context = "Registration Closed / Company Inactive"
+                status_line = (
+                    f"<li style='margin: 4px 0;'>"
+                    f"<strong>Active Status: {escape_html(active_label)}</strong>"
+                    f" ({escape_html(active_context)})</li>"
+                )
+            else:
+                status_line = ""
+
+            if changes:
+                extra_items = "".join(
+                    f"<li style='margin: 4px 0;'>{escape_html(c)}</li>" for c in changes
+                    if "Active Status" not in c  # avoid duplicate
+                )
+            else:
+                extra_items = ""
+            items_html = f"{status_line}{extra_items}"
+            if items_html:
+                changes_html = (
+                    f'<div style="background-color: #fff8e1; border-left: 4px solid #f57c00; '
+                    f'padding: 12px; margin: 18px 0; border-radius: 4px; font-size: 13px;">'
+                    f'<strong>Fields Updated:</strong><ul style="margin: 6px 0 0 0; padding-left: 18px;">'
+                    f"{items_html}</ul></div>"
+                )
+            else:
+                changes_html = ""
+        else:
+            changes_html = ""
 
         html = f"""<!DOCTYPE html>
 <html>
@@ -102,7 +169,7 @@ class DeliveryWorker:
                     <td style="padding: 8px 0; font-size: 14px; text-align: right;">{internship_type}</td>
                 </tr>
                 <tr style="border-bottom: 1px solid #eee;">
-                    <td style="padding: 8px 0; color: #666; font-size: 14px;"><strong>Package (LPA)</strong></td>
+                    <td style="padding: 8px 0; color: #666; font-size: 14px;"><strong>Compensation (source value)</strong></td>
                     <td style="padding: 8px 0; font-size: 14px; text-align: right; color: #2e7d32; font-weight: bold;">
                         {max_pkg} (Max) / {min_pkg} (Min)
                     </td>
@@ -129,7 +196,7 @@ class DeliveryWorker:
                 <strong>Eligible Programs:</strong><br/>
                 <span style="color: #444;">{programs_esc}</span>
             </div>
-
+{changes_html}
             <div style="text-align: center; margin: 24px 0 10px 0;">
                 {portal_button}
             </div>
@@ -139,6 +206,8 @@ class DeliveryWorker:
 
         <div style="background-color: #fafbfc; border-top: 1px solid #eaecef; padding: 14px 24px; font-size: 12px; color: #6a737d; text-align: center;">
             <p style="margin: 0 0 6px 0;">You are receiving this because you subscribed with your VIT Pune 2028 email.</p>
+            <!-- F15: Eligibility disclaimer — branch match is not proof of full employer eligibility -->
+            <p style="margin: 0 0 8px 0; font-style: italic;">Branch programme match does not confirm full eligibility. Please verify eligibility criteria and application requirements on the official VIT TPO portal before applying.</p>
             <p style="margin: 0;">
                 <a href="{safe_pref_url}" style="color: #0366d6; text-decoration: none;">Manage Preferences</a>
                 &nbsp;|&nbsp;
@@ -158,6 +227,14 @@ class DeliveryWorker:
         3. Delivers each email with rate pacing.
         Returns the number of successfully delivered notifications.
         """
+        if self.notification_pipeline is not None:
+            owner=getattr(self.notification_pipeline,'runtime_owner',None)
+            if owner is not None:owner.require_running('drain')
+            return self._process_v2_once()
+        from app.monitoring.runtime_supervisor import current_runtime
+        from app.database.event_repository import PolicyDenied
+        if current_runtime(getattr(self.delivery_repo,'db_path',None)) is not None:
+            raise PolicyDenied('guarded runtime excludes legacy subscriber claims')
         # 1. Recover stale leases from crashed workers
         recovered = self.delivery_repo.recover_stale_leases()
         if recovered > 0:
@@ -215,7 +292,9 @@ class DeliveryWorker:
                     notif_type=notif_type,
                     user_branch=user_branch,
                     unsub_url=unsub_url,
-                    pref_url=pref_url
+                    pref_url=pref_url,
+                    changes=None,  # delivery record does not persist change list; UPDATE context shown via title
+                    event_at=d.get("created_at"),  # F11: use dispatch-time clock
                 )
 
                 subject = f"{'🚨 NEW' if notif_type == 'NEW' else '⚠️ UPDATE'}: {company.company} on VIT TPO"
@@ -245,8 +324,114 @@ class DeliveryWorker:
 
         return delivered_count
 
+    def _process_v2_once(self):
+        from app.database.event_repository import CommitUnknown, Fenced, PolicyDenied
+        from app.monitoring.notification_pipeline import TransportResult
+        pipeline=self.notification_pipeline
+        self.last_v2_attempts=0
+        if pipeline.closed or not pipeline.options.drain or not pipeline.options.transport:
+            return 0
+        repo=pipeline.repository
+        pipeline.recover_once()
+        pipeline.fanout_once()
+        sent=0
+        for _ in range(min(25,self.batch_size)):
+            claim=None
+            for channel in (self._v2_channel,"SUBSCRIBER" if self._v2_channel=="ADMIN" else "ADMIN"):
+                try:
+                    from app.notifications.transport_arbiter import AuthorityGateway
+                    if isinstance(pipeline.transport,AuthorityGateway) and not pipeline.transport.prepare_slot(channel):
+                        continue
+                    claim=repo.claim_delivery(channel=channel,lose_ack=bool(pipeline.faults.get("claim_ack")))
+                except CommitUnknown as exc:
+                    try:
+                        claim=repo.inspect_claim(exc.key)
+                    except Fenced:
+                        claim=None
+                except Fenced:
+                    claim=None
+                if claim is not None:break
+            if claim is None:break
+            self._v2_channel="SUBSCRIBER" if channel=="ADMIN" else "ADMIN"
+            self.last_v2_attempts+=1
+            try:
+                row=repo._delivery(claim,("PROCESSING",))
+                links={}
+                headers={}
+                if row["channel"]=="SUBSCRIBER":
+                    association=repo._one("SELECT user_id FROM recipient_associations WHERE recipient_key=?",(row["recipient_key"],))
+                    user_id=association["user_id"]
+                    unsubscribe=self._generate_token(user_id,"UNSUBSCRIBE",timedelta(days=30))
+                    preferences=self._generate_token(user_id,"MANAGE_PREFS",timedelta(minutes=15))
+                    base=getattr(settings,"BASE_URL","http://127.0.0.1:8000")
+                    base=getattr(pipeline.transport,"action_base",base)
+                    links={"unsubscribe":base+"/unsubscribe#token="+unsubscribe,
+                           "preferences":base+"/preferences/confirm#token="+preferences}
+                    headers={"List-Unsubscribe":"<"+base+"/api/v1/unsubscribe/one-click?token="+unsubscribe+">",
+                             "List-Unsubscribe-Post":"List-Unsubscribe=One-Click"}
+                message=pipeline.render_delivery(claim,links)
+                message["headers"]=headers
+            except Fenced:
+                # Consent or a newer owner may already have retired this claim.
+                # Leave its durable state intact; expired preparation is recovered
+                # by the next pump quantum.
+                continue
+            except Exception:
+                try:
+                    repo.fail_preparation(claim,"RENDER_OR_LINK_PREPARATION")
+                except Fenced:
+                    pass
+                continue
+            try:
+                permit=repo.authorize_send(claim,lose_ack=bool(pipeline.faults.get("send_ack")))
+            except CommitUnknown:
+                repo.recover_delivery(claim.key,unknown_commit=True)
+                continue
+            except Fenced:
+                continue
+            if permit is None:continue
+            try:
+                result=repo.submit_fake(permit,pipeline.transport,message=message)
+                if not isinstance(result,TransportResult):
+                    raise PolicyDenied("typed fictional transport result required")
+                repo.record_fact(permit.invocation_id,result.kind,fact_key="finalized-message-result")
+                if result.ended:
+                    repo.record_fact(permit.invocation_id,"ENDED",fact_key="positive-fake-message-end")
+                if result.kind=="NOT_ACCEPTED" and not result.ended:
+                    repo.recover_delivery(claim.key,unknown_commit=True)
+                    continue
+                try:
+                    status=repo.acknowledge(claim,lose_ack=bool(pipeline.faults.get("ack")))
+                except CommitUnknown:
+                    status=repo._one("SELECT status FROM notification_deliveries_v2 WHERE delivery_id=?",(claim.key,))["status"]
+                sent+=int(status=="SENT")
+            except Exception:
+                # T6 is durable. An exception is never definitive nonacceptance or
+                # physical END, and must never create an automatic physical resend.
+                repo.record_fact(permit.invocation_id,"UNKNOWN",fact_key="message-exception")
+                repo.recover_delivery(claim.key,unknown_commit=True)
+        return sent
+
+    async def run_v2_loop(self,stop_event,*,wait=asyncio.sleep):
+        """Independent injectable pump; no source adapter is called here."""
+        if self.notification_pipeline is None:
+            raise ValueError("explicit local v2 pipeline required")
+        try:
+            while not stop_event.is_set() and not self.notification_pipeline.closed:
+                await self.process_batch_once()
+                await wait(self.notification_pipeline.next_wait_ms()/1000)
+        finally:
+            self.notification_pipeline.shutdown()
+
     def _send_smtp_email(self, to_email: str, subject: str, html_content: str, extra_headers: Optional[dict] = None) -> bool:
         """Fallback direct SMTP sender using settings."""
+        from app.monitoring.runtime_supervisor import current_runtime
+        from app.database.event_repository import PolicyDenied
+        if current_runtime(getattr(self.delivery_repo,'db_path',None)) is not None:
+            raise PolicyDenied('guarded runtime excludes fallback SMTP')
+        from app.notifications.transport_arbiter import AuthorityGateway
+        if self.notification_pipeline is not None or isinstance(getattr(self.notifier,"transport",None),AuthorityGateway):
+            raise ValueError("fictional gated transport cannot fall back to SMTP")
         import smtplib
         from email.message import EmailMessage
 
