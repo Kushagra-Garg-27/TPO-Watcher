@@ -11,10 +11,11 @@ from pathlib import Path
 from app.tpo.models import CompanyRecord
 from app.subscribers.worker import DeliveryWorker
 
-ARTIFACT_DIR = Path(r"C:\Users\kusha\.gemini\antigravity-ide\brain\a82e09f9-b0e9-4c4f-98d5-74e4e039608e\previews")
-LOCAL_DIR = Path(r"c:\Projects\TPO - Watcher\reports\previews")
+LOCAL_DIR = Path(__file__).resolve().parent
+ARTIFACT_DIR = Path(os.environ["TPO_PREVIEW_ARTIFACT_DIR"]) if "TPO_PREVIEW_ARTIFACT_DIR" in os.environ else None
 
-ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+if ARTIFACT_DIR:
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 LOCAL_DIR.mkdir(parents=True, exist_ok=True)
 
 worker = DeliveryWorker(delivery_repo=None, token_repo=None)
@@ -95,8 +96,11 @@ files = [
 for filename, content in files:
     local_path = LOCAL_DIR / filename
     local_path.write_text(content, encoding="utf-8")
-    artifact_path = ARTIFACT_DIR / filename
-    artifact_path.write_text(content, encoding="utf-8")
-    print(f"Generated: {local_path} and {artifact_path}")
+    if ARTIFACT_DIR and ARTIFACT_DIR != LOCAL_DIR:
+        artifact_path = ARTIFACT_DIR / filename
+        artifact_path.write_text(content, encoding="utf-8")
+        print(f"Generated: {local_path} and {artifact_path}")
+    else:
+        print(f"Generated: {local_path}")
 
 print("Successfully generated all email preview files.")

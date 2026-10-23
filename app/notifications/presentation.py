@@ -227,6 +227,8 @@ def clean_program_name(p: str) -> Optional[str]:
     """
     Cleans an individual program token for scannable display.
     Returns None if the token represents an invalid ERP artifact (e.g. 'VIT-null').
+    Preserves distinct institutional identifiers (VIIT, VU) when present, while stripping
+    redundant VIT- prefix and degree prefixes (B.Tech-, etc.) for clear readability.
     """
     raw = str(p or "").strip()
     if not raw:
@@ -236,17 +238,27 @@ def clean_program_name(p: str) -> Optional[str]:
     if re.search(r"(?:^|[-_\s/])(?:null|none|undefined|n/?a)(?:$|[-_\s/])", raw, re.IGNORECASE):
         return None
 
-    # Strip redundant college prefixes (VIT-, VIIT-, VU-)
-    s = re.sub(r"^(?:VIT|VIIT|VU)\s*[-–\.]\s*", "", raw, flags=re.IGNORECASE).strip()
+    # Preserve distinct sister institutional prefixes (VIIT, VU)
+    inst_match = re.match(r"^(VIIT|VU)\s*[-–\.]\s*", raw, flags=re.IGNORECASE)
+    inst_prefix = ""
+    if inst_match:
+        inst_prefix = f"{inst_match.group(1).upper()} - "
+        s = raw[inst_match.end():].strip()
+    else:
+        # Strip default VIT- prefix
+        s = re.sub(r"^VIT\s*[-–\.]\s*", "", raw, flags=re.IGNORECASE).strip()
+
     # Strip redundant degree prefixes (B.Tech-, BTech-, B.Tech. , Bachelor of Technology -)
     s = re.sub(r"^(?:B\.?Tech\.?|Bachelor of Technology)\s*[-–\.]?\s*", "", s, flags=re.IGNORECASE).strip()
-    return " ".join(s.split()) or raw
+    clean_title = " ".join(s.split()) or raw
+    return f"{inst_prefix}{clean_title}" if inst_prefix else clean_title
 
 
 def format_eligible_programs(programs_raw: Any) -> Tuple[List[str], str]:
     """
     Parses, cleans, deduplicates, and formats eligible programs for display.
     - Strips invalid ERP artifacts like 'VIT-null'.
+    - Preserves distinct institutional branches (e.g. VIIT vs VIT).
     - Deduplicates redundant program listings.
     - Provides a concise guidance note directing students to the official portal.
     Returns (cleaned_programs_list, reminder_note).
@@ -277,7 +289,7 @@ def format_eligible_programs(programs_raw: Any) -> Tuple[List[str], str]:
             seen.add(key)
             cleaned_list.append(clean)
 
-    note = "Branch match indicates eligibility to apply; verify full criteria, CGPA cutoffs, and requirements on official portal."
+    note = "Branch match indicates programme relevance only; full eligibility must be verified on the official TPO portal."
     return (cleaned_list, note)
 
 

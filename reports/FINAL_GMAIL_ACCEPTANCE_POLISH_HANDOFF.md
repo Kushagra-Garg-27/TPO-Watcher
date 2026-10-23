@@ -11,7 +11,7 @@
 
 ## 1. Executive Summary & Acceptance Test Findings
 
-Following the authorized historical Cummins India email test delivered to `kushgarg2272@gmail.com`, the actual received two-page PDF printout (`scratch/received_test.pdf`) was inspected. The core architectural remediations were successfully validated in the real Gmail client:
+Following the authorized historical Cummins India email test delivered to `student@example.invalid`, the actual received two-page PDF printout (`scratch/received_test.pdf`) was inspected. The core architectural remediations were successfully validated in the real Gmail client:
 - Subject line arrived clean with zero encoding artifacts or corrupted characters (`New TPO Opportunity: Cummins India | TPO-WATCHER`).
 - Branch personalization accurately matched and displayed `Computer Science and Engineering (Data Science)`.
 - Authentic historical registration window was faithfully formatted (`13-Oct-2026 11:31 to 14-Oct-2026 11:00`) with the `[Registration Closed]` status badge.
@@ -107,7 +107,7 @@ The release commit is strictly scoped to the email presentation polish, test reg
 
 ## 5. Deterministic Production Deployment Plan
 
-**Target Host:** `65.0.66.80`  
+**Target Host:** `<PRODUCTION_HOST_IP>`  
 **Deploy Path:** `/home/ec2-user/TPO-Watcher`  
 **Baseline Revision on Server:** `d8c0c471b1da3d4a9f9d2a235d1e8a3cd1155d49`  
 **Database Path:** `/home/ec2-user/TPO-Watcher/data/watcher.sqlite` (mounted into container at `/app/data/watcher.sqlite`)
@@ -121,7 +121,7 @@ git push origin student-auth/phase1-policy-contracts-20261012
 
 ### Step 2: Connect to Production EC2 and Pre-Deployment Backup
 ```bash
-ssh -i <SSH_KEY> ec2-user@65.0.66.80
+ssh -i <SSH_KEY> ec2-user@<PRODUCTION_HOST_IP>
 cd /home/ec2-user/TPO-Watcher
 
 # 1. Verify current running git HEAD

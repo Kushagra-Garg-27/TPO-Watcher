@@ -6,9 +6,10 @@ import asyncio
 from pathlib import Path
 from playwright.async_api import async_playwright
 
-PREVIEWS_DIR = Path(r"c:\Projects\TPO - Watcher\reports\previews")
-ARTIFACT_DIR = Path(r"C:\Users\kusha\.gemini\antigravity-ide\brain\a82e09f9-b0e9-4c4f-98d5-74e4e039608e")
-SCREENSHOTS_DIR = ARTIFACT_DIR / "screenshots"
+import os
+
+PREVIEWS_DIR = Path(__file__).resolve().parent
+SCREENSHOTS_DIR = Path(os.environ.get("TPO_SCREENSHOTS_DIR", str(PREVIEWS_DIR / "screenshots")))
 SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 targets = [

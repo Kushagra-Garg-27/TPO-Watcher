@@ -371,8 +371,8 @@ def test_19_correct_recipient_targeting(monkeypatch):
         "_send_email_to",
         lambda to_email, subject, html, **kw: sent_recipients.append(to_email) or True,
     )
-    provider._send_email_to("kushgarg2272@gmail.com", "Test Subject", "<p>Test</p>")
-    assert sent_recipients == ["kushgarg2272@gmail.com"]
+    provider._send_email_to("student@example.invalid", "Test Subject", "<p>Test</p>")
+    assert sent_recipients == ["student@example.invalid"]
 
 
 # 20. No duplicate notifications (delivery uniqueness verification)
@@ -412,7 +412,7 @@ def test_22_no_changes_to_watcher_scheduling_or_sync():
     assert hasattr(watcher, "_process_notifications")
 
 
-# 23. Eligible programs filters invalid artifacts like VIT-null and deduplicates
+# 23. Eligible programs filters invalid artifacts like VIT-null, preserves VIIT/VU, and deduplicates
 def test_23_eligible_programs_filters_invalid_artifacts_and_deduplicates():
     from app.notifications.presentation import format_eligible_programs
     raw = (
@@ -444,8 +444,15 @@ def test_23_eligible_programs_filters_invalid_artifacts_and_deduplicates():
     # Distinct specializations: AIML, AIDS, CSE AI (duplicate legacy code alias removed)
     assert len(ai_entries) == 3
 
-    # 4. Directive note to check official portal
-    assert "official portal" in note.lower()
+    # 4. Directive note to check official portal with exact required wording
+    assert note == "Branch match indicates programme relevance only; full eligibility must be verified on the official TPO portal."
+
+    # 5. Distinct institutional identifiers (VIIT, VU) are preserved
+    raw_multi_inst = "VIT-BTech-Computer Engineering, VIIT-BTech-Computer Engineering, VU-BTech-Computer Science"
+    multi_inst_cleaned, _ = format_eligible_programs(raw_multi_inst)
+    assert "Computer Engineering" in multi_inst_cleaned
+    assert "VIIT - Computer Engineering" in multi_inst_cleaned
+    assert "VU - Computer Science" in multi_inst_cleaned
 
     # 5. HTML presentation renders badges
     worker = DeliveryWorker(delivery_repo=None, token_repo=None)
