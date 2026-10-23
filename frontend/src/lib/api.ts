@@ -27,7 +27,22 @@ export interface PreferencesResponse {
   pref_ppo: boolean
 }
 
-export interface Opportunity {
+// Historical / database-backed opportunity record from /api/v1/opportunities
+export interface LegacyOpportunity {
+  id: string
+  company: string
+  max_package: string | null
+  min_package: string | null
+  placement_type: string | null
+  registration_end: string | null
+  eligible_programs: string | null
+  company_type: string | null
+  is_active: string | null
+  first_seen_at: string | null
+}
+
+// Verified opportunity record from /api/v1/opportunity-listing
+export interface VerifiedOpportunity {
   id: string
   company: string
   max_package: string | null
@@ -55,8 +70,11 @@ export interface Opportunity {
   valid_until_ms: number
 }
 
+// Backwards-compatible alias for verified listing items
+export type Opportunity = VerifiedOpportunity
+
 export interface OpportunityListing {
-  items: Opportunity[]
+  items: VerifiedOpportunity[]
   total: number
   shown: number
   status: 'VERIFIED' | 'STALE' | 'UNVERIFIED'
@@ -99,6 +117,19 @@ function isOpportunityListing(value: unknown): value is OpportunityListing {
         !nullableFields.every(key => item[key] === null || typeof item[key] === 'string')) return false
     ids.add(item.id)
     return true
+  })
+}
+
+function isLegacyOpportunityArray(value: unknown): value is LegacyOpportunity[] {
+  if (!Array.isArray(value)) return false
+  const nullableFields = ['max_package', 'min_package', 'placement_type', 'registration_end',
+    'eligible_programs', 'company_type', 'is_active', 'first_seen_at']
+  return value.every((item: unknown) => {
+    if (typeof item !== 'object' || item === null) return false
+    const rec = item as Record<string, unknown>
+    if (typeof rec.id !== 'string' || !rec.id.trim() ||
+        typeof rec.company !== 'string' || !rec.company.trim()) return false
+    return nullableFields.every(key => rec[key] === null || rec[key] === undefined || typeof rec[key] === 'string')
   })
 }
 
@@ -180,8 +211,13 @@ export const api = {
     })
   },
 
-  async getOpportunities(): Promise<ApiResult<Opportunity[]>> {
-    return request('/api/v1/opportunities')
+  async getOpportunities(): Promise<ApiResult<LegacyOpportunity[]>> {
+    const res = await request<unknown>('/api/v1/opportunities')
+    if (!res.ok) return { ok: false, error: res.error, status: res.status }
+    if (!isLegacyOpportunityArray(res.data)) {
+      return { ok: false, error: 'Opportunities response is invalid.', status: 502 }
+    }
+    return { ok: true, data: res.data }
   },
 
   async getOpportunityListing(): Promise<ApiResult<OpportunityListing>> {

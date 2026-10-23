@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { Building2, Calendar, Award, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react'
 import { FadeUp } from '../motion/FadeUp'
-import { api, type Opportunity } from '../../lib/api'
+import { api, type LegacyOpportunity } from '../../lib/api'
 
 // Maps backend Opportunity fields to the editorial display format.
 // Never hardcodes company names, IDs, or package values.
@@ -43,7 +43,7 @@ function formatFirstSeen(firstSeenAt: string | null): string {
 }
 
 export function RecentDetections() {
-  const [opportunities, setOpportunities] = useState<Opportunity[]>([])
+  const [opportunities, setOpportunities] = useState<LegacyOpportunity[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
