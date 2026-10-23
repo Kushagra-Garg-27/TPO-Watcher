@@ -11,6 +11,14 @@ from app.database.interfaces import DeliveryRepositoryProtocol, TokenRepositoryP
 from app.tpo.models import CompanyRecord
 from app.notifications.email import EmailNotificationProvider
 from app.notifications.utils import escape_html, sanitize_url, render_safe_link
+from app.notifications.presentation import (
+    format_opportunity_subject,
+    format_compensation,
+    format_registration_window,
+    format_internship_type,
+    render_opportunity_html,
+    render_opportunity_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,148 +84,92 @@ class DeliveryWorker:
             now_ist = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
 
         programs = company_record.tpoprogram or company_record.programnew or "Not Specified"
-        header_color = "#d32f2f" if notif_type == "NEW" else "#f57c00"
-        title = "🚨 NEW VIT TPO OPPORTUNITY" if notif_type == "NEW" else "⚠️ VIT TPO OPPORTUNITY UPDATED"
+        comp_main, comp_note = format_compensation(
+            company_record.maxPackage,
+            company_record.minPackage,
+            getattr(company_record, "compensation_unit", None),
+            getattr(company_record, "compensation_unit_evidence", None),
+        )
+        reg_info = format_registration_window(company_record)
+        intern_type = format_internship_type(company_record.internshiptype)
 
-        company_name = escape_html(company_record.company)
-        company_code = escape_html(company_record.company_code or "N/A")
-        placement_type = escape_html(company_record.placementtype or "N/A")
-        internship_type = escape_html(company_record.internshiptype or "N/A")
-        # F03: Do not assert compensation unit (LPA / monthly / annual) from raw numeric
-        # magnitude alone — the portal does not expose reliable unit metadata.  Show the
-        # source value verbatim so subscribers can verify on the portal.
-        max_pkg = escape_html(company_record.maxPackage or "N/A")
-        min_pkg = escape_html(company_record.minPackage or "N/A")
-        reg_start = escape_html(f"{company_record.regStartdate or 'N/A'} {company_record.regStarttime or ''}".strip())
-        reg_end = escape_html(f"{company_record.regEnddate or 'N/A'} {company_record.regEndtime or ''}".strip())
-        academic_year = escape_html(company_record.academicyear or "N/A")
-        user_branch_esc = escape_html(user_branch)
-        programs_esc = escape_html(programs)
-        now_ist_esc = escape_html(now_ist)
-
-        safe_pref_url = sanitize_url(pref_url) or "#"
-        safe_unsub_url = sanitize_url(unsub_url) or "#"
-        portal_button = render_safe_link(
-            "https://tpo.vierp.in/company-dashboard",
-            "Open Official TPO Portal",
-            style="background-color: #0366d6; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 6px; font-weight: bold; font-size: 15px; display: inline-block;"
+        return render_opportunity_html(
+            company_name=company_record.company,
+            company_code=company_record.company_code or "N/A",
+            placement_type=company_record.placementtype or "N/A",
+            internship_type=intern_type,
+            compensation_main=comp_main,
+            compensation_note=comp_note,
+            reg_window_text=reg_info["display_text"],
+            reg_badge=reg_info["badge"],
+            reg_note=reg_info["note"],
+            academic_year=company_record.academicyear or "N/A",
+            organization=company_record.organization or "VIT",
+            user_branch=user_branch,
+            programs=programs,
+            notif_type=notif_type,
+            now_ist_str=now_ist,
+            portal_url="https://tpo.vierp.in/company-dashboard",
+            pref_url=pref_url,
+            unsub_url=unsub_url,
+            changes=changes,
+            is_active_raw=company_record.isactive,
+            channel="subscriber",
         )
 
-        # F10/G09: For UPDATE emails, surface the changed fields and lifecycle status.
-        # The changes list may be absent (not persisted in the delivery row), so we
-        # also emit an explicit Active Status line from the snapshot isactive field.
-        if notif_type != "NEW":
-            active_raw = str(company_record.isactive or "").strip().lower()
-            if active_raw in ("true", "1", "yes"):
-                active_label = "True"
-                active_context = "Company Active"
-                status_line = (
-                    f"<li style='margin: 4px 0;'>"
-                    f"<strong>Active Status: {escape_html(active_label)}</strong>"
-                    f" ({escape_html(active_context)})</li>"
-                )
-            elif active_raw in ("false", "0", "no"):
-                active_label = "False"
-                active_context = "Registration Closed / Company Inactive"
-                status_line = (
-                    f"<li style='margin: 4px 0;'>"
-                    f"<strong>Active Status: {escape_html(active_label)}</strong>"
-                    f" ({escape_html(active_context)})</li>"
-                )
-            else:
-                status_line = ""
-
-            if changes:
-                extra_items = "".join(
-                    f"<li style='margin: 4px 0;'>{escape_html(c)}</li>" for c in changes
-                    if "Active Status" not in c  # avoid duplicate
-                )
-            else:
-                extra_items = ""
-            items_html = f"{status_line}{extra_items}"
-            if items_html:
-                changes_html = (
-                    f'<div style="background-color: #fff8e1; border-left: 4px solid #f57c00; '
-                    f'padding: 12px; margin: 18px 0; border-radius: 4px; font-size: 13px;">'
-                    f'<strong>Fields Updated:</strong><ul style="margin: 6px 0 0 0; padding-left: 18px;">'
-                    f"{items_html}</ul></div>"
-                )
-            else:
-                changes_html = ""
+    def _format_opportunity_text(
+        self,
+        company_record: CompanyRecord,
+        notif_type: str,
+        user_branch: str,
+        unsub_url: str,
+        pref_url: str,
+        changes: Optional[List[str]] = None,
+        event_at: Optional[str] = None,
+    ) -> str:
+        IST = timezone(timedelta(hours=5, minutes=30))
+        if event_at is not None:
+            try:
+                _dt = datetime.fromisoformat(str(event_at))
+                if _dt.tzinfo is None:
+                    _dt = _dt.replace(tzinfo=timezone.utc)
+                now_ist = _dt.astimezone(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+            except Exception:
+                now_ist = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
         else:
-            changes_html = ""
+            now_ist = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
 
-        html = f"""<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"/></head>
-<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #222; background-color: #f7f9fa; padding: 20px;">
-    <div style="max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 8px; overflow: hidden; border: 1px solid #e1e4e8; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
-        <div style="background-color: {header_color}; color: #ffffff; padding: 18px 24px;">
-            <h2 style="margin: 0; font-size: 20px;">{title}</h2>
-            <p style="margin: 4px 0 0 0; font-size: 13px; opacity: 0.9;">Exclusive Alert for VIT Pune Class of 2028</p>
-        </div>
-        <div style="padding: 24px;">
-            <p style="font-size: 16px; margin-top: 0;"><strong>Company:</strong> <span style="font-size: 18px; color: #111;">{company_name}</span> ({company_code})</p>
-            
-            <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
-                <tr style="border-bottom: 1px solid #eee;">
-                    <td style="padding: 8px 0; color: #666; font-size: 14px;"><strong>Placement Type</strong></td>
-                    <td style="padding: 8px 0; font-size: 14px; text-align: right;">{placement_type}</td>
-                </tr>
-                <tr style="border-bottom: 1px solid #eee;">
-                    <td style="padding: 8px 0; color: #666; font-size: 14px;"><strong>Internship Type</strong></td>
-                    <td style="padding: 8px 0; font-size: 14px; text-align: right;">{internship_type}</td>
-                </tr>
-                <tr style="border-bottom: 1px solid #eee;">
-                    <td style="padding: 8px 0; color: #666; font-size: 14px;"><strong>Compensation (source value)</strong></td>
-                    <td style="padding: 8px 0; font-size: 14px; text-align: right; color: #2e7d32; font-weight: bold;">
-                        {max_pkg} (Max) / {min_pkg} (Min)
-                    </td>
-                </tr>
-                <tr style="border-bottom: 1px solid #eee;">
-                    <td style="padding: 8px 0; color: #666; font-size: 14px;"><strong>Registration Window</strong></td>
-                    <td style="padding: 8px 0; font-size: 14px; text-align: right;">
-                        {reg_start}<br/>
-                        to<br/>
-                        {reg_end}
-                    </td>
-                </tr>
-                <tr style="border-bottom: 1px solid #eee;">
-                    <td style="padding: 8px 0; color: #666; font-size: 14px;"><strong>Academic Cycle</strong></td>
-                    <td style="padding: 8px 0; font-size: 14px; text-align: right;">{academic_year}</td>
-                </tr>
-                <tr style="border-bottom: 1px solid #eee;">
-                    <td style="padding: 8px 0; color: #666; font-size: 14px;"><strong>Your Matched Branch</strong></td>
-                    <td style="padding: 8px 0; font-size: 14px; text-align: right; color: #1976d2; font-weight: bold;">{user_branch_esc}</td>
-                </tr>
-            </table>
+        programs = company_record.tpoprogram or company_record.programnew or "Not Specified"
+        comp_main, comp_note = format_compensation(
+            company_record.maxPackage,
+            company_record.minPackage,
+            getattr(company_record, "compensation_unit", None),
+            getattr(company_record, "compensation_unit_evidence", None),
+        )
+        reg_info = format_registration_window(company_record)
+        intern_type = format_internship_type(company_record.internshiptype)
 
-            <div style="background-color: #f1f8ff; border-left: 4px solid #0366d6; padding: 12px; margin: 18px 0; border-radius: 4px; font-size: 13px;">
-                <strong>Eligible Programs:</strong><br/>
-                <span style="color: #444;">{programs_esc}</span>
-            </div>
-{changes_html}
-            <div style="text-align: center; margin: 24px 0 10px 0;">
-                {portal_button}
-            </div>
-            
-            <p style="font-size: 12px; color: #777; text-align: center; margin-top: 10px;">Detected at: {now_ist_esc}</p>
-        </div>
-
-        <div style="background-color: #fafbfc; border-top: 1px solid #eaecef; padding: 14px 24px; font-size: 12px; color: #6a737d; text-align: center;">
-            <p style="margin: 0 0 6px 0;">You are receiving this because you subscribed with your VIT Pune 2028 email.</p>
-            <!-- F15: Eligibility disclaimer — branch match is not proof of full employer eligibility -->
-            <p style="margin: 0 0 8px 0; font-style: italic;">Branch programme match does not confirm full eligibility. Please verify eligibility criteria and application requirements on the official VIT TPO portal before applying.</p>
-            <p style="margin: 0;">
-                <a href="{safe_pref_url}" style="color: #0366d6; text-decoration: none;">Manage Preferences</a>
-                &nbsp;|&nbsp;
-                <a href="{safe_unsub_url}" style="color: #d73a49; text-decoration: none;">Unsubscribe</a>
-            </p>
-        </div>
-    </div>
-</body>
-</html>"""
-        return html
+        return render_opportunity_text(
+            company_name=company_record.company,
+            company_code=company_record.company_code or "N/A",
+            placement_type=company_record.placementtype or "N/A",
+            internship_type=intern_type,
+            compensation_main=comp_main,
+            compensation_note=comp_note,
+            reg_window_text=reg_info["display_text"],
+            reg_badge=reg_info["badge"],
+            academic_year=company_record.academicyear or "N/A",
+            organization=company_record.organization or "VIT",
+            user_branch=user_branch,
+            programs=programs,
+            notif_type=notif_type,
+            now_ist_str=now_ist,
+            portal_url="https://tpo.vierp.in/company-dashboard",
+            pref_url=pref_url,
+            unsub_url=unsub_url,
+            changes=changes,
+            channel="subscriber",
+        )
 
     async def process_batch_once(self) -> int:
         """
@@ -296,16 +248,34 @@ class DeliveryWorker:
                     changes=None,  # delivery record does not persist change list; UPDATE context shown via title
                     event_at=d.get("created_at"),  # F11: use dispatch-time clock
                 )
+                plain_content = self._format_opportunity_text(
+                    company_record=company,
+                    notif_type=notif_type,
+                    user_branch=user_branch,
+                    unsub_url=unsub_url,
+                    pref_url=pref_url,
+                    changes=None,
+                    event_at=d.get("created_at"),
+                )
 
-                subject = f"{'🚨 NEW' if notif_type == 'NEW' else '⚠️ UPDATE'}: {company.company} on VIT TPO"
+                subject = format_opportunity_subject(notif_type, company.company)
 
                 # Send email directly to the student's email address
                 success = False
                 if hasattr(self.notifier, "_send_email_to"):
-                    success = self.notifier._send_email_to(user_email, subject, html_content, extra_headers=extra_headers)
+                    try:
+                        success = self.notifier._send_email_to(
+                            user_email, subject, html_content, extra_headers=extra_headers, plain_content=plain_content
+                        )
+                    except TypeError:
+                        success = self.notifier._send_email_to(
+                            user_email, subject, html_content, extra_headers=extra_headers
+                        )
                 else:
                     # Use fallback helper if method doesn't exist
-                    success = self._send_smtp_email(user_email, subject, html_content, extra_headers=extra_headers)
+                    success = self._send_smtp_email(
+                        user_email, subject, html_content, extra_headers=extra_headers, plain_content=plain_content
+                    )
 
                 if success:
                     self.delivery_repo.mark_sent(delivery_id)
@@ -423,7 +393,14 @@ class DeliveryWorker:
         finally:
             self.notification_pipeline.shutdown()
 
-    def _send_smtp_email(self, to_email: str, subject: str, html_content: str, extra_headers: Optional[dict] = None) -> bool:
+    def _send_smtp_email(
+        self,
+        to_email: str,
+        subject: str,
+        html_content: str,
+        extra_headers: Optional[dict] = None,
+        plain_content: Optional[str] = None,
+    ) -> bool:
         """Fallback direct SMTP sender using settings."""
         from app.monitoring.runtime_supervisor import current_runtime
         from app.database.event_repository import PolicyDenied
@@ -439,11 +416,15 @@ class DeliveryWorker:
             logger.warning("SMTP configuration missing. Cannot send delivery.")
             return False
 
+        clean_subject = " ".join(str(subject).split())
         msg = EmailMessage()
-        msg['Subject'] = subject
+        msg['Subject'] = clean_subject
         msg['From'] = settings.EMAIL_FROM or settings.SMTP_USERNAME
         msg['To'] = to_email
-        msg.set_content("Please enable HTML to view this email.")
+        if plain_content:
+            msg.set_content(plain_content)
+        else:
+            msg.set_content("Please enable HTML to view this email.")
         msg.add_alternative(html_content, subtype='html')
 
         if extra_headers:

@@ -9,6 +9,14 @@ from app.notifications.base import NotificationProvider
 from app.notifications.transport_protocol import MailOutcome
 
 from app.notifications.utils import escape_html, render_safe_link
+from app.notifications.presentation import (
+    format_opportunity_subject,
+    format_compensation,
+    format_registration_window,
+    format_internship_type,
+    render_opportunity_html,
+    render_opportunity_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +27,22 @@ class EmailNotificationProvider(NotificationProvider):
             if not isinstance(transport,AuthorityGateway):raise ValueError("explicit gated fictional adapter required")
         self.transport=transport
 
-    def _send_email(self, subject: str, html_content: str) -> bool:
-        return self._send_email_to(settings.EMAIL_TO, subject, html_content)
+    def _send_email(self, subject: str, html_content: str, plain_content: Optional[str] = None) -> bool:
+        try:
+            return self._send_email_to(settings.EMAIL_TO, subject, html_content, plain_content=plain_content)
+        except TypeError:
+            return self._send_email_to(settings.EMAIL_TO, subject, html_content)
 
-    def _send_email_to(self, to_email: str, subject: str, html_content: str, extra_headers: Optional[dict] = None, *, expires_ms=None) -> bool | MailOutcome:
+    def _send_email_to(
+        self,
+        to_email: str,
+        subject: str,
+        html_content: str,
+        extra_headers: Optional[dict] = None,
+        *,
+        plain_content: Optional[str] = None,
+        expires_ms=None,
+    ) -> bool | MailOutcome:
         from app.monitoring.runtime_supervisor import current_runtime
         from app.database.event_repository import PolicyDenied
         if self.transport is None and current_runtime() is not None:
@@ -34,13 +54,17 @@ class EmailNotificationProvider(NotificationProvider):
         if not settings.SMTP_HOST or not settings.SMTP_USERNAME or not to_email:
             logger.warning("Email configuration or recipient missing. Skipping email notification.")
             return False
-            
+
+        clean_subject = " ".join(str(subject).split())
         msg = EmailMessage()
-        msg['Subject'] = subject
+        msg['Subject'] = clean_subject
         msg['From'] = settings.EMAIL_FROM or settings.SMTP_USERNAME
         msg['To'] = to_email
-        
-        msg.set_content("Please enable HTML to view this email.")
+
+        if plain_content:
+            msg.set_content(plain_content)
+        else:
+            msg.set_content("Please enable HTML to view this email.")
         msg.add_alternative(html_content, subtype='html')
 
         if extra_headers:
@@ -52,7 +76,7 @@ class EmailNotificationProvider(NotificationProvider):
                 server.starttls()
                 server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
                 server.send_message(msg)
-            logger.info(f"Email sent successfully to {to_email}: {subject}")
+            logger.info(f"Email sent successfully to {to_email}: {clean_subject}")
             return True
         except Exception as e:
             logger.error(f"Failed to send email to {to_email}: {e}")
@@ -60,11 +84,10 @@ class EmailNotificationProvider(NotificationProvider):
 
     def send_new_company_notification(self, company: CompanyRecord, target_match: bool, event_at=None) -> bool | MailOutcome:
         if self.transport is not None:return self.transport.send_admin(company.id)
-        subject = f"🚨 NEW VIT TPO COMPANY: {company.company}"
-        
-        match_str = "YES" if target_match else "NO"
+        subject = format_opportunity_subject("NEW", company.company)
+
         programs = company.tpoprogram or company.programnew or "Not Specified"
-        
+
         IST = timezone(timedelta(hours=5, minutes=30))
         # F11: use event-time (first_seen_at / explicit event_at) not render-time.
         # This ensures the email shows when the opportunity was first detected,
@@ -85,92 +108,125 @@ class EmailNotificationProvider(NotificationProvider):
             detected_dt = detected_dt.replace(tzinfo=timezone.utc)
         detected_time = detected_dt.astimezone(IST).strftime("%d-%b-%Y %H:%M:%S IST")
 
-        
-        company_name = escape_html(company.company)
-        company_code = escape_html(company.company_code or "N/A")
-        placement_type = escape_html(company.placementtype or "N/A")
-        internship_type = escape_html(company.internshiptype or "N/A")
-        max_pkg = escape_html(company.maxPackage or "N/A")
-        min_pkg = escape_html(company.minPackage or "N/A")
-        reg_start = escape_html(f"{company.regStartdate or 'N/A'} {company.regStarttime or ''}".strip())
-        reg_end = escape_html(f"{company.regEnddate or 'N/A'} {company.regEndtime or ''}".strip())
-        academic_year = escape_html(company.academicyear or "N/A")
-        eligibility = escape_html(programs)
-        match_escaped = escape_html(match_str)
-        organization = escape_html(company.organization or "N/A")
-        detected_time_esc = escape_html(detected_time)
-        portal_button = render_safe_link(
-            "https://tpo.vierp.in/company-dashboard",
-            "Open TPO Portal",
-            style="display: inline-block; padding: 10px 20px; background-color: #1976d2; color: white; text-decoration: none; border-radius: 5px;"
+        comp_main, comp_note = format_compensation(
+            company.maxPackage,
+            company.minPackage,
+            getattr(company, "compensation_unit", None),
+            getattr(company, "compensation_unit_evidence", None),
+        )
+        reg_info = format_registration_window(company)
+        intern_type = format_internship_type(company.internshiptype)
+
+        html = render_opportunity_html(
+            company_name=company.company,
+            company_code=company.company_code or "N/A",
+            placement_type=company.placementtype or "N/A",
+            internship_type=intern_type,
+            compensation_main=comp_main,
+            compensation_note=comp_note,
+            reg_window_text=reg_info["display_text"],
+            reg_badge=reg_info["badge"],
+            reg_note=reg_info["note"],
+            academic_year=company.academicyear or "N/A",
+            organization=company.organization or "N/A",
+            user_branch="",
+            programs=programs,
+            notif_type="NEW",
+            now_ist_str=detected_time,
+            portal_url="https://tpo.vierp.in/company-dashboard",
+            pref_url="",
+            unsub_url="",
+            channel="admin",
+        )
+        text = render_opportunity_text(
+            company_name=company.company,
+            company_code=company.company_code or "N/A",
+            placement_type=company.placementtype or "N/A",
+            internship_type=intern_type,
+            compensation_main=comp_main,
+            compensation_note=comp_note,
+            reg_window_text=reg_info["display_text"],
+            reg_badge=reg_info["badge"],
+            academic_year=company.academicyear or "N/A",
+            organization=company.organization or "N/A",
+            user_branch="",
+            programs=programs,
+            notif_type="NEW",
+            now_ist_str=detected_time,
+            portal_url="https://tpo.vierp.in/company-dashboard",
+            pref_url="",
+            unsub_url="",
+            channel="admin",
         )
 
-        html = f"""
-        <html>
-        <body style="font-family: sans-serif; line-height: 1.6; color: #333;">
-            <h2 style="color: #d32f2f;">🚨 NEW VIT TPO OPPORTUNITY</h2>
-            
-            <p><strong>Company:</strong> {company_name} ({company_code})</p>
-            <p><strong>Placement Type:</strong> {placement_type}</p>
-            <p><strong>Internship Type:</strong> {internship_type}</p>
-            
-            <p><strong>Package:</strong> {max_pkg} (Max) / {min_pkg} (Min)</p>
-            
-            <p><strong>Registration:</strong><br/>
-               {reg_start}<br/>
-               to<br/>
-               {reg_end}
-            </p>
-            
-            <p><strong>Academic Year:</strong> {academic_year}</p>
-            <p><strong>Eligibility:</strong> {eligibility}</p>
-            <p><strong>Matches your target programs:</strong> {match_escaped}</p>
-            <p><strong>Organization:</strong> {organization}</p>
-            
-            <p><strong>Detected:</strong> {detected_time_esc}</p>
-            
-            <!-- F15: eligibility disclaimer for admin channel -->
-            <p style="font-style: italic; color: #555; font-size: 13px;">
-                Branch programme match does not confirm full eligibility. Please verify eligibility criteria
-                and application requirements on the official VIT TPO portal before any action.
-            </p>
-
-            <p>{portal_button}</p>
-        </body>
-        </html>
-        """
-        
-        return self._send_email(subject, html)
+        try:
+            return self._send_email(subject, html, plain_content=text)
+        except TypeError:
+            return self._send_email(subject, html)
 
     def send_update_notification(self, company: CompanyRecord, changes: List[str]) -> bool | MailOutcome:
         if self.transport is not None:return self.transport.send_admin(company.id)
-        subject = f"⚠️ VIT TPO OPPORTUNITY UPDATED: {company.company}"
-        
-        company_name = escape_html(company.company)
-        changes_html = "<ul>"
-        for change in changes:
-            changes_html += f"<li>{escape_html(change)}</li>"
-        changes_html += "</ul>"
-        
-        portal_button = render_safe_link(
-            "https://tpo.vierp.in/company-dashboard",
-            "Open TPO Portal",
-            style="display: inline-block; padding: 10px 20px; background-color: #1976d2; color: white; text-decoration: none; border-radius: 5px;"
+        subject = format_opportunity_subject("UPDATE", company.company)
+
+        IST = timezone(timedelta(hours=5, minutes=30))
+        now_ist = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+        programs = company.tpoprogram or company.programnew or "Not Specified"
+
+        comp_main, comp_note = format_compensation(
+            company.maxPackage,
+            company.minPackage,
+            getattr(company, "compensation_unit", None),
+            getattr(company, "compensation_unit_evidence", None),
+        )
+        reg_info = format_registration_window(company)
+        intern_type = format_internship_type(company.internshiptype)
+
+        html = render_opportunity_html(
+            company_name=company.company,
+            company_code=company.company_code or "N/A",
+            placement_type=company.placementtype or "N/A",
+            internship_type=intern_type,
+            compensation_main=comp_main,
+            compensation_note=comp_note,
+            reg_window_text=reg_info["display_text"],
+            reg_badge=reg_info["badge"],
+            reg_note=reg_info["note"],
+            academic_year=company.academicyear or "N/A",
+            organization=company.organization or "N/A",
+            user_branch="",
+            programs=programs,
+            notif_type="UPDATE",
+            now_ist_str=now_ist,
+            portal_url="https://tpo.vierp.in/company-dashboard",
+            pref_url="",
+            unsub_url="",
+            changes=changes,
+            is_active_raw=company.isactive,
+            channel="admin",
+        )
+        text = render_opportunity_text(
+            company_name=company.company,
+            company_code=company.company_code or "N/A",
+            placement_type=company.placementtype or "N/A",
+            internship_type=intern_type,
+            compensation_main=comp_main,
+            compensation_note=comp_note,
+            reg_window_text=reg_info["display_text"],
+            reg_badge=reg_info["badge"],
+            academic_year=company.academicyear or "N/A",
+            organization=company.organization or "N/A",
+            user_branch="",
+            programs=programs,
+            notif_type="UPDATE",
+            now_ist_str=now_ist,
+            portal_url="https://tpo.vierp.in/company-dashboard",
+            pref_url="",
+            unsub_url="",
+            changes=changes,
+            channel="admin",
         )
 
-        html = f"""
-        <html>
-        <body style="font-family: sans-serif; line-height: 1.6; color: #333;">
-            <h2 style="color: #f57c00;">⚠️ VIT TPO OPPORTUNITY UPDATED</h2>
-            
-            <p><strong>Company:</strong> {company_name}</p>
-            
-            <h3>Changes Detected:</h3>
-            {changes_html}
-            
-            <p>{portal_button}</p>
-        </body>
-        </html>
-        """
-        
-        return self._send_email(subject, html)
+        try:
+            return self._send_email(subject, html, plain_content=text)
+        except TypeError:
+            return self._send_email(subject, html)

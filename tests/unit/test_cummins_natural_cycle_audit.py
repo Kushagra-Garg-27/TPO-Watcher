@@ -217,7 +217,8 @@ def test_f02_distinct_update_after_sent_is_independently_queueable(audit_repo):
 
 def test_f03_unknown_compensation_units_must_not_be_asserted_as_lpa(audit_repo):
     text = render_subscriber(audit_repo)
-    assert "25000.0 (Max) / 25000.0 (Min)" in text
+    assert "25,000" in text
+    assert "Unit not specified by TPO" in text
     assert "Internship + Performance based PPO" in text
     # No invented degree/unit fields: raw numeric magnitude proves neither.
     require_contract("LPA" not in text, "F03",
