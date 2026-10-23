@@ -9,6 +9,49 @@ logger = logging.getLogger(__name__)
 
 API_ENDPOINT = "https://tpoapi.vierp.in/TPOCompanyScheduling/newschedulesdcopanies"
 
+_UNDECODED = object()
+
+
+def _json_type(value):
+    """Fixed vocabulary only: never include response keys or values."""
+    if value is _UNDECODED:
+        return "unavailable"
+    return {dict: "object", list: "array", str: "string", bool: "boolean",
+            int: "integer", float: "number", type(None): "null"}.get(type(value), "other")
+
+
+def _log_rejected_response(response, category, body=_UNDECODED):
+    # Content-Type parameters (and arbitrary header values) may contain secrets.
+    media_type = getattr(response, "headers", {}).get("content-type", "").split(";", 1)[0].strip().lower()
+    content_type = media_type if media_type in (
+        "application/json", "text/json", "text/html", "text/plain") else "other_or_missing"
+    fields = {key: (_json_type(body[key]) if key in body else "missing")
+              for key in ("status", "error", "company_list", "data", "result", "companies", "msg", "message")} if isinstance(body, dict) else {}
+    items = body.get("company_list", _UNDECODED) if isinstance(body, dict) else _UNDECODED
+    logger.warning(
+        "Rejected TPO response: category=%s http_status=%s content_type=%s "
+        "json_type=%s fields=%s company_list_length=%s",
+        category, response.status, content_type, _json_type(body), fields,
+        len(items) if isinstance(items, list) else "unavailable")
+
+
+def _source_rejection_category(body):
+    # Explain the existing guard; this helper does not decide acceptance.
+    if not isinstance(body, dict):
+        return "non_object"
+    if body.get("error"):
+        return "application_error"
+    if body.get("status") not in (None, "success", "Success", True, 200):
+        return "invalid_status"
+    if "company_list" not in body:
+        return "missing_company_list"
+    if not isinstance(body["company_list"], list):
+        return "invalid_company_list_type"
+    if len(body["company_list"]) > 2000:
+        return "oversized_company_list"
+    return "invalid_company_identity"
+
+
 class AuthenticationError(Exception):
     pass
 
@@ -70,35 +113,40 @@ class TPOClient:
             response = await resp_info.value
             
             if response.status in (401, 403):
+                _log_rejected_response(response, "session_expired_http")
                 logger.warning("API returned 401/403. Session expired.")
                 raise AuthenticationError("Session expired (HTTP 401/403)")
                 
             if not response.ok:
+                _log_rejected_response(response, "http_failure")
                 logger.error(f"API returned HTTP {response.status}")
                 raise Exception(f"API request failed with status {response.status}")
                 
             json_text = await response.text()
             if not json_text:
+                _log_rejected_response(response, "empty_response")
                 raise Exception("API returned empty response.")
                 
             try:
                 data = json.loads(json_text)
-            except json.JSONDecodeError as e:
-                logger.error("Failed to parse JSON response from API.")
-                raise Exception(f"Invalid JSON from API: {e}")
+            except json.JSONDecodeError:
+                _log_rejected_response(response, "malformed_json")
+                raise Exception("Invalid JSON from API") from None
                 
             if isinstance(data, dict) and data.get("error") and not data.get("company_list"):
-                err_msg = data.get("msg") or data.get("error")
-                logger.warning(f"API returned error payload: {err_msg}")
-                raise AuthenticationError(f"API authentication error: {err_msg}")
+                _log_rejected_response(response, "application_error", data)
+                raise AuthenticationError("API authentication error: application error payload")
                 
             try:
-                from app.tpo.listing import validate_listing_body
+                from app.tpo.listing import validate_listing_body, SourceEvidenceError
                 validate_listing_body(data)
                 api_response = APIResponse(**data)
-            except ValidationError as e:
-                logger.error("API schema validation failed.")
-                raise Exception(f"Unexpected API schema: {e}")
+            except SourceEvidenceError:
+                _log_rejected_response(response, _source_rejection_category(data), data)
+                raise
+            except ValidationError:
+                _log_rejected_response(response, "invalid_company_schema", data)
+                raise Exception("Unexpected API schema") from None
                 
             self._listing_body=data
             logger.info(f"Successfully fetched {len(api_response.company_list)} companies.")
@@ -112,10 +160,10 @@ class TPOClient:
             if "login" in page.url or page.url.rstrip("/") == "https://tpo.vierp.in" or await page.locator("input[type='password']").count() > 0:
                 logger.warning("Redirected to login page. Session expired.")
                 raise AuthenticationError("Session expired (redirected to login)")
-            logger.error(f"Playwright error in fetch_companies: {e}")
+            logger.error("Playwright error in fetch_companies.")
             raise
         except AuthenticationError:
             raise
         except Exception as e:
-            logger.error(f"Error in fetch_companies: {e}")
+            logger.error("Error in fetch_companies (%s).", type(e).__name__)
             raise

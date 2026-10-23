@@ -264,7 +264,7 @@ class PlacementWatcher:
                     send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
                     return False
             except Exception as e:
-                logger.error(f"Error during check iteration: {e}")
+                logger.error("Error during check iteration (%s).", type(e).__name__)
                 self.record_heartbeat_failure()
                 send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
                 return False
@@ -350,8 +350,11 @@ class PlacementWatcher:
                     await asyncio.sleep(wait_seconds)
                     
                 logger.info("Starting scheduled TPO check...")
-                await self.check_once()
-                logger.info("TPO check completed successfully.")
+                succeeded = await self.check_once()
+                if succeeded:
+                    logger.info("TPO check completed successfully.")
+                else:
+                    logger.error("TPO check failed.")
                 
             except asyncio.CancelledError:
                 logger.info("Watcher service stopped.")
