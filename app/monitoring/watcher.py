@@ -75,8 +75,17 @@ class PlacementWatcher:
         return False
 
     @staticmethod
-    def _notification_record(company_dict):
-        """Keep source fields intact, with the established legacy-column fallback."""
+    def _notification_record(company_dict, event_snapshot=None):
+        """F07: render from the durable event-time snapshot first. Legacy
+        obligations without a snapshot keep the established legacy-column
+        fallback to the current stored row."""
+        if event_snapshot:
+            try:
+                raw = json.loads(event_snapshot)
+                if isinstance(raw, dict):
+                    return CompanyRecord(**{**raw, "id": company_dict["id"], "company": company_dict["company"]})
+            except (TypeError, ValueError):
+                pass
         try:
             raw = json.loads(company_dict.get("raw_data_json") or "null")
             if not isinstance(raw, dict):
@@ -107,7 +116,7 @@ class PlacementWatcher:
                 if not company_dict:
                     self.db.remove_pending_notification(notif["id"])
                     continue
-                record = self._notification_record(company_dict)
+                record = self._notification_record(company_dict, notif.get("event_snapshot_json"))
                 receipt_key = f"notification:v1:fanout:{notif['id']}"
                 if self.db.get_system_state(receipt_key) != "complete":
                     # Existing persisted obligations are replayed even when the

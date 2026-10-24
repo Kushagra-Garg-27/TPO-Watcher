@@ -590,7 +590,9 @@ async def test_full_no_reset_natural_cycle_characterization(audit_repo, monkeypa
     for name, changes in steps:
         current = current.model_copy(update=changes)
         feed = [] if name == "L_EMPTY" else [control] if name == "K_DISAPPEAR" else [control, current]
-        result = detector.process_fetched_companies(feed)
+        # F02: only the disappearance step carries fictional completeness
+        # authority; every other observation reconciles nothing absent.
+        result = detector.process_fetched_companies(feed, observation_complete=(name == "K_DISAPPEAR"))
         inserted = 0
         for new in result.new_companies:
             inserted += fanout.dispatch_opportunity(new, "NEW")

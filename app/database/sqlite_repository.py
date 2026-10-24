@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import logging
 import secrets
 from datetime import datetime, timezone, timedelta
@@ -406,6 +407,36 @@ class SQLiteDeliveryRepository(SQLiteBaseRepository):
     def _claim_key(cls, delivery_id):
         return cls._CLAIM_PREFIX + str(int(delivery_id))
 
+    # Flattened repository columns the meaningful-change comparison reads.
+    _EVENT_COLUMNS = (
+        ("maxPackage", "max_package"), ("minPackage", "min_package"),
+        ("placementtype", "placement_type"), ("internshiptype", "internship_type"),
+    )
+
+    @classmethod
+    def _snapshot_event_distinct(cls, existing_snapshot, new_snapshot):
+        """F07: event identity follows the approved meaningful-change semantics,
+        not bytewise snapshot equality. Equivalent representations (e.g. zero
+        seconds in a time field) are replays of the same event; only a
+        meaningful change starts a new one."""
+        if existing_snapshot == new_snapshot:
+            return False
+        from app.monitoring.detector import CompanyDetector
+        from app.tpo.models import CompanyRecord
+        try:
+            if existing_snapshot is None or new_snapshot is None:
+                return True
+            old_record = CompanyRecord(**json.loads(existing_snapshot))
+            new_record = CompanyRecord(**json.loads(new_snapshot))
+        except (TypeError, ValueError):
+            # Unparseable evidence can never prove equivalence; bytewise
+            # difference stands.
+            return existing_snapshot != new_snapshot
+        existing_dict = {column: getattr(old_record, field, None) for field, column in cls._EVENT_COLUMNS}
+        existing_dict["is_active"] = old_record.isactive
+        existing_dict["raw_data_json"] = existing_snapshot
+        return bool(CompanyDetector.meaningful_changes(existing_dict, new_record))
+
     def enqueue_deliveries(self, deliveries: List[Dict[str, Any]]) -> int:
         if not deliveries:
             return 0
@@ -416,23 +447,24 @@ class SQLiteDeliveryRepository(SQLiteBaseRepository):
                 conn.execute("BEGIN IMMEDIATE")
             for d in deliveries:
                 notif_type = d["notification_type"]
+                snapshot = d.get("raw_data_snapshot")
                 existing = conn.execute(
-                    """SELECT id, status, raw_data_snapshot FROM notification_deliveries
+                    """SELECT id, status, raw_data_snapshot, error_message FROM notification_deliveries
                        WHERE user_id=? AND company_id=? AND notification_type=?""",
                     (d["user_id"], str(d["company_id"]), notif_type),
                 ).fetchone()
-                if (existing and notif_type == 'UPDATE' and
-                        existing['status'] in ('PENDING', 'PROCESSING') and
-                        d.get('raw_data_snapshot') is not None and
-                        d['raw_data_snapshot'] != existing['raw_data_snapshot']):
+                if (existing and notif_type == 'UPDATE'
+                        and existing['status'] in ('PENDING', 'PROCESSING')
+                        and snapshot is not None
+                        and self._snapshot_event_distinct(existing['raw_data_snapshot'], snapshot)):
                     # Roll back the whole recipient enqueue unit. The persisted
-                    # admin/fanout obligation remains retryable rather than being
-                    # acknowledged while a distinct UPDATE is silently lost.
+                    # admin/fanout obligation (with its own event snapshot)
+                    # remains retryable rather than being acknowledged while a
+                    # distinct UPDATE is silently lost.
                     raise DeliveryFanoutDeferred('prior_update_still_pending')
 
                 if existing is None:
                     # No prior row — insert fresh.
-                    snapshot = d.get("raw_data_snapshot")
                     cursor = conn.execute(
                         """INSERT OR IGNORE INTO notification_deliveries
                                (user_id, company_id, notification_type, status, created_at, raw_data_snapshot)
@@ -441,17 +473,30 @@ class SQLiteDeliveryRepository(SQLiteBaseRepository):
                     )
                     if cursor.rowcount > 0:
                         inserted += 1
-                elif existing["status"] == "SENT" and notif_type != "NEW":
-                    # A prior delivery completed.  A new distinct event of this type
-                    # has arrived (e.g. a second opportunity UPDATE for the same
-                    # company).  Re-queue by resetting the row so the worker delivers it.
-                    # NEW deliveries remain strictly one-shot per company/user pair.
-                    snapshot = d.get("raw_data_snapshot")
-                    # A replay after durable enqueue but before fanout receipt
-                    # must not resend the same UPDATE. Distinct snapshots still
-                    # preserve the established later-UPDATE behavior.
-                    if snapshot is not None and snapshot == existing["raw_data_snapshot"]:
+                elif notif_type == 'NEW':
+                    # NEW deliveries remain strictly one-shot per company/user
+                    # pair for the lifetime of the row.
+                    continue
+                elif existing['status'] in ('SENT', 'FAILED'):
+                    # A distinct event of this type has arrived (e.g. a later
+                    # genuine deadline change). F06: a terminal FAILED row may
+                    # accept it too — terminality applies to the prior attempt,
+                    # whose outcome is preserved in the append-only outcome log,
+                    # never to all future distinct events.
+                    if snapshot is not None and not self._snapshot_event_distinct(
+                            existing['raw_data_snapshot'], snapshot):
+                        # A replay after durable enqueue but before fanout
+                        # receipt, or an equivalent representation of the
+                        # already-delivered event: never resend.
                         continue
+                    if existing['status'] == 'FAILED':
+                        conn.execute("""
+                            INSERT INTO notification_delivery_outcome_log
+                                (delivery_id, user_id, company_id, notification_type,
+                                 prior_status, event_snapshot, outcome_note, recorded_at)
+                            VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?)
+                        """, (existing["id"], d["user_id"], str(d["company_id"]), notif_type,
+                              existing["raw_data_snapshot"], existing["error_message"], now))
                     conn.execute(
                         """UPDATE notification_deliveries
                            SET status='PENDING', created_at=?, attempt_count=0,
@@ -462,7 +507,7 @@ class SQLiteDeliveryRepository(SQLiteBaseRepository):
                         (now, snapshot, existing["id"]),
                     )
                     inserted += 1
-                # else: PENDING/PROCESSING already in-flight — true duplicate; skip.
+                # else: PENDING/PROCESSING same event — true duplicate; skip.
             conn.commit()
         return inserted
 

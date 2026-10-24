@@ -159,7 +159,12 @@ def test_b1_preserves_empty_feed_absence_and_legacy_return(b1_repo):
     assert not detector.process_fetched_companies([record, control]).new_companies
     assert not detector.process_fetched_companies([]).deactivated_companies
     assert b1_repo.get_company(record.id)["is_active"] == "True"
-    assert detector.process_fetched_companies([control]).deactivated_companies == [record.id]
+    # F02: a feed without completeness authority can never fabricate absence…
+    assert detector.process_fetched_companies([control]).deactivated_companies == []
+    assert b1_repo.get_company(record.id)["is_active"] == "True"
+    # …while an explicitly complete observation reconciles absence as before.
+    assert detector.process_fetched_companies(
+        [control], observation_complete=True).deactivated_companies == [record.id]
     assert json.loads(b1_repo.get_company(record.id)["raw_data_json"])["isactive"] == "True"
     returned = detector.process_fetched_companies([record, control])
     assert not returned.new_companies
