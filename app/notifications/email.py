@@ -76,10 +76,12 @@ class EmailNotificationProvider(NotificationProvider):
                 server.starttls()
                 server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
                 server.send_message(msg)
-            logger.info(f"Email sent successfully to {to_email}: {clean_subject}")
+            # F08: shared logs carry outcome only — never recipient, subject
+            # or arbitrary provider/transport error text.
+            logger.info("Email dispatch accepted by provider.")
             return True
-        except Exception as e:
-            logger.error(f"Failed to send email to {to_email}: {e}")
+        except Exception as exc:
+            logger.error("Email dispatch failed (%s).", type(exc).__name__)
             return False
 
     def send_new_company_notification(self, company: CompanyRecord, target_match: bool, event_at=None) -> bool | MailOutcome:

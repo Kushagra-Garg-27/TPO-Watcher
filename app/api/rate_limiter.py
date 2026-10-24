@@ -1,5 +1,6 @@
 import time
 import threading
+import hashlib
 import logging
 import ipaddress
 from typing import Dict, List, Tuple, Optional
@@ -124,7 +125,11 @@ def check_rate_limit(
     allowed, retry_after = limiter.check(key, max_requests, window_seconds)
     if not allowed:
         client_ip = get_client_ip(request)
-        logger.warning(f"Rate limit exceeded for key '{key}' from IP '{client_ip}'. Retry after {retry_after}s.")
+        # F08: keys may embed target addresses; log only a bounded fingerprint.
+        key_id = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+        logger.warning(
+            "Rate limit exceeded (key_id=%s, ip=%s, retry_after=%ds).",
+            key_id, client_ip, retry_after)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=detail or f"Rate limit exceeded. Please retry after {retry_after} seconds.",
