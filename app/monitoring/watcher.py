@@ -353,10 +353,14 @@ class PlacementWatcher:
                 logger.info("Starting scheduled TPO check...")
                 # F12: durable missed-start ledger. A gap here distinguishes
                 # "scheduler never started a cycle" from "cycle started and
-                # failed" without inducing any catch-up polling.
-                self.db.set_system_state(
-                    "last_scheduled_check_started",
-                    datetime.now(timezone.utc).isoformat())
+                # failed" without inducing any catch-up polling. A ledger
+                # failure must never prevent the check itself.
+                try:
+                    self.db.set_system_state(
+                        "last_scheduled_check_started",
+                        datetime.now(timezone.utc).isoformat())
+                except Exception:
+                    logger.warning("Could not record the scheduled-start ledger entry.")
                 succeeded = await self.check_once()
                 if succeeded:
                     logger.info("TPO check completed successfully.")

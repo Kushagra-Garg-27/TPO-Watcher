@@ -214,7 +214,6 @@ class TestBackupHealthchecks:
         file_size = dummy_file.stat().st_size
 
         snapshot_meta = json.dumps({"status": "ok", "path": "/app/data/backups/test.sqlite", "size": file_size})
-        list_response = json.dumps({"Contents": [{"Key": "backups/test.sqlite", "Size": file_size}]})
 
         def mock_run_cmd(args, check=True):
             if args[0] == "docker" and args[1] == "exec":
@@ -227,7 +226,15 @@ class TestBackupHealthchecks:
             elif args[0] == "aws" and args[1] == "s3" and args[2] == "cp":
                 return MagicMock(returncode=0, stdout="upload ok", stderr="")
             elif args[0] == "aws" and args[1] == "s3api":
-                return MagicMock(returncode=0, stdout=list_response, stderr="")
+                # Echo the exact requested key (F17 unique-key contract):
+                # the first call is the no-overwrite pre-check, later calls
+                # verify the uploaded object.
+                requested = args[args.index("--prefix") + 1]
+                calls = getattr(mock_run_cmd, "list_calls", 0) + 1
+                mock_run_cmd.list_calls = calls
+                size = None if calls == 1 else file_size
+                contents = [] if size is None else [{"Key": requested, "Size": size}]
+                return MagicMock(returncode=0, stdout=json.dumps({"Contents": contents}), stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("scripts.backup_sqlite.run_cmd", side_effect=mock_run_cmd), \
@@ -271,7 +278,6 @@ class TestBackupHealthchecks:
         file_size = dummy_file.stat().st_size
 
         snapshot_meta = json.dumps({"status": "ok", "path": "/app/data/backups/test.sqlite", "size": file_size})
-        list_response = json.dumps({"Contents": [{"Key": "backups/test.sqlite", "Size": file_size}]})
 
         def mock_run_cmd(args, check=True):
             if args[0] == "docker" and args[1] == "exec":
@@ -284,7 +290,15 @@ class TestBackupHealthchecks:
             elif args[0] == "aws" and args[1] == "s3" and args[2] == "cp":
                 return MagicMock(returncode=0, stdout="upload ok", stderr="")
             elif args[0] == "aws" and args[1] == "s3api":
-                return MagicMock(returncode=0, stdout=list_response, stderr="")
+                # Echo the exact requested key (F17 unique-key contract):
+                # the first call is the no-overwrite pre-check, later calls
+                # verify the uploaded object.
+                requested = args[args.index("--prefix") + 1]
+                calls = getattr(mock_run_cmd, "list_calls", 0) + 1
+                mock_run_cmd.list_calls = calls
+                size = None if calls == 1 else file_size
+                contents = [] if size is None else [{"Key": requested, "Size": size}]
+                return MagicMock(returncode=0, stdout=json.dumps({"Contents": contents}), stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("scripts.backup_sqlite.run_cmd", side_effect=mock_run_cmd), \
@@ -302,7 +316,6 @@ class TestBackupHealthchecks:
         file_size = dummy_file.stat().st_size
 
         snapshot_meta = json.dumps({"status": "ok", "path": "/app/data/backups/test.sqlite", "size": file_size})
-        list_response = json.dumps({"Contents": [{"Key": "backups/test.sqlite", "Size": file_size}]})
 
         def mock_run_cmd(args, check=True):
             if args[0] == "docker" and args[1] == "exec":
@@ -315,7 +328,15 @@ class TestBackupHealthchecks:
             elif args[0] == "aws" and args[1] == "s3" and args[2] == "cp":
                 return MagicMock(returncode=0, stdout="upload ok", stderr="")
             elif args[0] == "aws" and args[1] == "s3api":
-                return MagicMock(returncode=0, stdout=list_response, stderr="")
+                # Echo the exact requested key (F17 unique-key contract):
+                # the first call is the no-overwrite pre-check, later calls
+                # verify the uploaded object.
+                requested = args[args.index("--prefix") + 1]
+                calls = getattr(mock_run_cmd, "list_calls", 0) + 1
+                mock_run_cmd.list_calls = calls
+                size = None if calls == 1 else file_size
+                contents = [] if size is None else [{"Key": requested, "Size": size}]
+                return MagicMock(returncode=0, stdout=json.dumps({"Contents": contents}), stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("scripts.backup_sqlite.run_cmd", side_effect=mock_run_cmd), \
