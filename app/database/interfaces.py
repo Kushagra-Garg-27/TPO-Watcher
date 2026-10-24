@@ -26,7 +26,8 @@ class UserRepositoryProtocol(Protocol):
         user_id: int, 
         pref_internship: bool, 
         pref_placement: bool, 
-        pref_ppo: bool
+        pref_ppo: bool,
+        branch_canonical: "Optional[str]" = None,
     ) -> None: ...
 
 class TokenRepositoryProtocol(Protocol):

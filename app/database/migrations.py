@@ -94,5 +94,15 @@ def run_migrations(db_path: str) -> None:
             ON notification_deliveries(status, lease_expires_at);
         """)
 
+        # Migration: add raw_data_snapshot column for event-time delivery fidelity (F11)
+        cursor = conn.execute("PRAGMA table_info(notification_deliveries);")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+        if "raw_data_snapshot" not in existing_cols:
+            try:
+                conn.execute("ALTER TABLE notification_deliveries ADD COLUMN raw_data_snapshot TEXT")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
         conn.commit()
     logger.info("Database migrations applied successfully.")

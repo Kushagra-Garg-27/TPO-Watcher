@@ -107,17 +107,34 @@ async def test_reconciliation_test_d_fetch_failure_preserves_active_state(repo):
     Expected:
         NO active records are deactivated.
     """
+    from unittest.mock import AsyncMock
+    from app.monitoring.watcher import AuthManager
+
     detector = CompanyDetector(repo)
     comp_a = _create_record("1", "Company A")
     comp_b = _create_record("2", "Company B")
     detector.process_fetched_companies([comp_a, comp_b])
 
     watcher = PlacementWatcher(db=repo)
-    with patch.object(TPOClient, "fetch_companies", side_effect=AuthenticationError("Session expired (HTTP 401)")):
-        with patch.object(watcher.auth, "get_valid_page", return_value=MagicMock()):
-            with patch.object(watcher.auth, "is_authenticated", return_value=True):
-                with patch.object(watcher.auth, "login", return_value=None):
-                    await watcher.check_once()
+    initial_auth = watcher.auth
+    # Recovery constructs a new AuthManager; class patches cover both instances.
+    with (
+        patch.object(TPOClient, "fetch_companies", new_callable=AsyncMock,
+                     side_effect=AuthenticationError("Session expired (HTTP 401)")) as fetch,
+        patch.object(AuthManager, "get_valid_page", new_callable=AsyncMock,
+                     return_value=MagicMock()) as get_page,
+        patch.object(AuthManager, "is_authenticated", new_callable=AsyncMock,
+                     return_value=True) as authenticated,
+        patch.object(AuthManager, "stop", new_callable=AsyncMock, return_value=None) as stop,
+        patch.object(AuthManager, "login", new_callable=AsyncMock, return_value=None) as login,
+    ):
+        assert await watcher.check_once() is False
+        assert watcher.auth is not initial_auth
+        assert fetch.await_count == 2
+        assert get_page.await_count == 2
+        assert authenticated.await_count == 2
+        stop.assert_awaited_once_with()
+        login.assert_not_awaited()
 
     # Active companies remain untouched
     assert repo.get_company("1")["is_active"] == "True"
@@ -216,3 +233,26 @@ def test_reconciliation_test_h_null_records_not_activated(repo, detector):
     assert record["is_active"] is None
     assert "5610" not in result.deactivated_companies
     assert repo.get_company("1")["is_active"] == "True"
+
+
+def test_reconciliation_absent_or_unknown_portal_status_not_treated_as_inactive(repo, detector):
+    """
+    G04 Reassessment: An absent (None) or unknown portal status in an incomplete
+    portal response must NOT be treated as confirmed inactive.
+    It must preserve the existing active status and not emit false deactivation updates.
+    """
+    comp_a = _create_record("10", "Active Corp", is_active="True")
+    detector.process_fetched_companies([comp_a])
+    assert repo.get_company("10")["is_active"] == "True"
+
+    # Simulate subsequent incomplete portal response where isactive is None
+    comp_a_incomplete = _create_record("10", "Active Corp", is_active=None)
+    result = detector.process_fetched_companies([comp_a_incomplete])
+
+    # Must NOT report an active status change
+    assert not any("Active Status" in ch for c, ch_list in result.updated_companies for ch in ch_list)
+    # Must NOT be deactivated
+    assert "10" not in result.deactivated_companies
+    # Must preserve existing active status in repository
+    assert repo.get_company("10")["is_active"] == "True"
+
