@@ -65,6 +65,63 @@ def test_canonical_organization_filtering():
     # Must be empty because VIT Pune is not an eligible organization
     assert len(branches) == 0
 
+
+@pytest.mark.parametrize("primary,secondary,organization,want", [
+    ("VIT-BTech-Computer Engineering", None, None, set()),
+    ("VIT-BTech-Computer Engineering", None, "", set()),
+    ("VIT-BTech-Computer Engineering", None, "VIT/VIIT", set()),
+    ("BTech-Computer Engineering", None, "VIT", set()),
+    ("UNKNOWN-BTech-Computer Engineering", None, "VIT", set()),
+    ("VU-BTech-Computer Engineering", None, "VIT, VU", set()),
+    ("VIT-BTech-Computer Science and Engineering (Data Science), VIIT-BTech-Computer Engineering",
+     None, "VIT, VIIT", {CanonicalBranch.VIT_CSE_DS}),
+    ("VIT-BTech-Computer Engineering", "BTech-Information Technology", "VIT",
+     {CanonicalBranch.VIT_CE}),
+    ("VIT-BTech-Computer Engineering", "VIT-BTech-Information Technology", "VIT",
+     {CanonicalBranch.VIT_CE, CanonicalBranch.VIT_IT}),
+    ("VIT-BTech-Computer Engineering (Unrecognized)", None, "VIT", set()),
+    ("VIT-BTech-Computer Engineering, VIIT-BTech-Computer Engineering (",
+     "VIT-BTech-Information Technology", "VIT, VIIT", {CanonicalBranch.VIT_IT}),
+    ("VIT/VIIT-BTech-Computer Engineering", None, "VIT, VIIT", set()),
+    ("VIT-BTech-Computer Engineering,,VIT-BTech-Information Technology", None, "VIT", set()),
+    (" vit - btech - computer engineering ; VIT-BTech-Computer Engineering ", None,
+     "vit; viit", {CanonicalBranch.VIT_CE}),
+    ("UNKNOWN-token; VIT-BTech-Information Technology", None, "VIT", {CanonicalBranch.VIT_IT}),
+    ("VIT_CSE_DS, VIT_AIDS, VIT_CE", None, "VIT",
+     {CanonicalBranch.VIT_CSE_DS, CanonicalBranch.VIT_AIDS, CanonicalBranch.VIT_CE}),
+])
+def test_b1_institution_provenance_and_independent_fields(primary, secondary, organization, want):
+    assert extract_eligible_canonical_branches(primary, secondary, organization) == want
+
+
+@pytest.mark.parametrize("branch", list(CanonicalBranch))
+def test_b1_every_supported_qualified_alias_and_identifier(branch):
+    from app.subscribers.canonical import CANONICAL_TO_TPO_STRINGS
+    assert extract_eligible_canonical_branches(branch.value, None, "VIT") == {branch}
+    for alias in CANONICAL_TO_TPO_STRINGS[branch]:
+        if alias.startswith("VIT-"):
+            assert extract_eligible_canonical_branches(alias, None, "VIT, VIIT") == {branch}
+        else:
+            assert extract_eligible_canonical_branches(alias, None, "VIT") == set()
+
+
+def test_b1_field_disagreements_and_unresolved_reasons_do_not_log_payload(caplog):
+    from app.subscribers.canonical import explain_eligible_canonical_branches
+    primary = "VIT-BTech-Computer Engineering"
+    secondary = "VIT-BTech-Information Technology; UNKNOWN-private-marker"
+    evidence = explain_eligible_canonical_branches(primary, secondary, "VIT, VIIT")
+    assert evidence.primary.branches == {CanonicalBranch.VIT_CE}
+    assert evidence.secondary.branches == {CanonicalBranch.VIT_IT}
+    assert evidence.fields_disagree
+    assert evidence.secondary.unresolved_reasons == ("FOREIGN_OR_UNKNOWN_INSTITUTE",)
+    assert evidence.organization_reason is None
+    with caplog.at_level("DEBUG", logger="app.subscribers.canonical"):
+        assert extract_eligible_canonical_branches(primary, secondary, "VIT, VIIT") == {
+            CanonicalBranch.VIT_CE, CanonicalBranch.VIT_IT}
+    assert "private-marker" not in caplog.text
+    assert primary not in caplog.text
+    assert "FOREIGN_OR_UNKNOWN_INSTITUTE" in caplog.text
+
 def test_opportunity_type_preferences():
     # 1. Internship + PPO
     co_ppo = CompanyRecord(

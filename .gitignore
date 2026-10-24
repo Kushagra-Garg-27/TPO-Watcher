@@ -13,3 +13,7 @@ playwright_state.json
 .venv/
 .freebuff/
 .agents/
+scratch/
+showreel/
+snapshots of new company listed/
+tpo-audit-*/

@@ -62,6 +62,20 @@ class PreferenceUpdate(BaseModel):
     pref_internship: bool
     pref_placement: bool
     pref_ppo: bool
+    # F07: branch_canonical is now updatable via authenticated preferences PUT.
+    # Optional so that clients omitting it preserve the existing branch.
+    branch_canonical: Optional[str] = None
+
+    @field_validator("branch_canonical", mode="before")
+    @classmethod
+    def validate_branch(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        from app.subscribers.canonical import CanonicalBranch
+        valid = {b.value for b in CanonicalBranch}
+        if v not in valid:
+            raise ValueError(f"branch_canonical must be one of: {sorted(valid)}")
+        return v
 
 class PreferenceResponse(BaseModel):
     model_config = {"extra": "forbid"}

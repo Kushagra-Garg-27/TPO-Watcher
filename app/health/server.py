@@ -2,7 +2,7 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from typing import Dict, Any
-from fastapi import APIRouter, status
+from fastapi import APIRouter, status, Request
 from fastapi.responses import JSONResponse
 
 from app.database.repository import DB_PATH
@@ -12,12 +12,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Health & Monitoring"])
 
 @router.get("/health")
-def health_check() -> Dict[str, Any]:
+def health_check(request: Request) -> Dict[str, Any]:
     """
     Public health check probe.
     Checks SQLite database connectivity and provides baseline, watcher freshness, & delivery statistics.
     Does NOT allow triggering TPO scraping or administrative state modification.
     """
+    runtime=getattr(request.app.state,"notification_runtime",None)
+    if runtime is not None:
+        diagnostic=runtime.diagnostics()
+        running=diagnostic["runtime_available"]
+        return JSONResponse(status_code=200 if running else 503,
+            content={"status":"guarded" if running else "held","notification":diagnostic})
     db_ok = False
     baseline_ok = False
     deliveries_stats = {}
