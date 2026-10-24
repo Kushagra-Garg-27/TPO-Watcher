@@ -1,0 +1,140 @@
+name: ARM64 Qualification (Gate B)
+
+# Single-purpose, one-time qualification of the integrated release candidate
+# on a genuine GitHub-hosted ARM64 runner. Read-only, secret-free, deploy-free.
+# Triggers ONLY on the dedicated qualification branch created for this run.
+
+'on':
+  push:
+    branches:
+      - codex/arm64-qualification-workflow-20261025
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arm64-qualification-gate-b
+  cancel-in-progress: false
+
+jobs:
+  arm64-qualification:
+    name: Native aarch64 isolated suite
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - name: Fail fast unless the runner is genuinely aarch64
+        run: |
+          set -euo pipefail
+          uname -a
+          test "$(uname -m)" = "aarch64"
+
+      - name: Record Linux distribution and kernel
+        run: |
+          set -euo pipefail
+          cat /etc/os-release
+          uname -r
+
+      - name: Checkout qualification source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Verify exact candidate lineage and unchanged application bytes
+        run: |
+          set -euo pipefail
+          echo "HEAD:        $(git rev-parse HEAD)"
+          echo "HEAD tree:   $(git rev-parse 'HEAD^{tree}')"
+          CANDIDATE=053b152b37d8aea8d5b4c74606765cdc73565136
+          EXPECTED_TREE=cbddf9ec5ff185b8ba643f4a5801a0e2c07a1bdf
+          git merge-base --is-ancestor "$CANDIDATE" HEAD || {
+            echo "::error::candidate $CANDIDATE is not an ancestor of this branch"; exit 1; }
+          test "$(git rev-parse "$CANDIDATE^{tree}")" = "$EXPECTED_TREE" || {
+            echo "::error::candidate tree hash mismatch"; exit 1; }
+          CHANGED=$(git diff --name-only "$CANDIDATE"..HEAD -- app/ tests/ requirements.txt frontend/ docker-compose.yml Dockerfile)
+          if [ -n "$CHANGED" ]; then
+            echo "::error::qualification branch modifies application/test bytes:" $CHANGED
+            exit 1
+          fi
+          echo "Candidate verified: $CANDIDATE (tree $EXPECTED_TREE); branch adds workflow/docs only."
+
+      - name: Set up CPython 3.12
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.12"
+          cache: false
+
+      - name: Record interpreter and install exactly the pinned test requirements
+        run: |
+          set -euo pipefail
+          python --version
+          python -I -m pip --version
+          python -m pip install -r requirements.txt
+          echo "--- installed pins:"
+          python -m pip freeze
+
+      - name: Record test collection inventory
+        run: |
+          set -euo pipefail
+          python -I -B tests/isolation_bootstrap.py --pytest --collect-only -q 2>&1 | tail -3
+
+      - name: Execute both previously-skipped native tests (must pass, not skip)
+        run: |
+          set -euo pipefail
+          python -I -B tests/isolation_bootstrap.py --pytest \
+            "tests/integration/test_test_isolation.py::test_native_sendmsg_method_has_installed_guard" \
+            "tests/integration/test_test_isolation.py::test_linux_owned_descriptor_operations_and_safe_cleanup" \
+            -q --tb=short
+
+      - name: Real POSIX ownership/mode enforcement on fictional files
+        env:
+          POSIXCHECK: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, stat, sys
+          base = os.environ["POSIXCHECK"]
+          priv = os.path.join(base, "posix-check")
+          os.makedirs(priv, exist_ok=True)
+          os.chmod(priv, 0o700)
+          secret_file = os.path.join(priv, "fictional-private.txt")
+          with open(secret_file, "w", encoding="utf-8") as handle:
+              handle.write("fictional-only")
+          os.chmod(secret_file, 0o600)
+          assert stat.S_IMODE(os.stat(priv).st_mode) == 0o700, "0700 dir mode not enforced"
+          assert stat.S_IMODE(os.stat(secret_file).st_mode) == 0o600, "0600 file mode not enforced"
+          info = os.stat(secret_file)
+          print(f"owner uid={info.st_uid} gid={info.st_gid} mode={oct(stat.S_IMODE(info.st_mode))}")
+          print("POSIX-CHECK-SETUP-OK")
+          PY
+          # Real cross-user enforcement: the unprivileged 'nobody' account
+          # must be denied both the private file and its directory.
+          if sudo -u nobody cat "$POSIXCHECK/posix-check/fictional-private.txt" >/dev/null 2>&1; then
+            echo "::error::0600 file was readable by another user"; exit 1
+          fi
+          if sudo -u nobody ls "$POSIXCHECK/posix-check" >/dev/null 2>&1; then
+            echo "::error::0700 directory was listable by another user"; exit 1
+          fi
+          echo "POSIX-CHECK-ENFORCEMENT-OK"
+
+      - name: Complete isolated suite (record totals, exit code, remaining skips)
+        env:
+          SUITELOG: ${{ runner.temp }}/suite.log
+        run: |
+          set -euo pipefail
+          python -I -B tests/isolation_bootstrap.py --pytest -q --tb=short -rs 2>&1 | tee "$SUITELOG"
+          status=${PIPESTATUS[0]}
+          echo "SUITE_EXIT_CODE=$status"
+          echo "--- remaining skips (must not include the two native tests):"
+          grep -E "^SKIPPED" "$SUITELOG" || echo "(none)"
+          if grep -E "^SKIPPED" "$SUITELOG" | grep -q \
+            "test_native_sendmsg_method_has_installed_guard\|test_linux_owned_descriptor_operations_and_safe_cleanup"; then
+            echo "::error::a native qualification test was skipped, not executed"; exit 1
+          fi
+          exit "$status"
+
+      # Deliberately NO artifact upload: the bootstrap writes its evidence to a
+      # temp isolation root outside the workspace; nothing private persists.
+      # Deliberately NO secrets, environments, caches, containers or pushes.
