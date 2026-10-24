@@ -48,17 +48,23 @@ jobs:
           echo "HEAD:        $(git rev-parse HEAD)"
           echo "HEAD tree:   $(git rev-parse 'HEAD^{tree}')"
           CANDIDATE=053b152b37d8aea8d5b4c74606765cdc73565136
+          QUALTEST=85646d0641365bcbe6b590bd0e28732340f33e09
           EXPECTED_TREE=cbddf9ec5ff185b8ba643f4a5801a0e2c07a1bdf
           git merge-base --is-ancestor "$CANDIDATE" HEAD || {
             echo "::error::candidate $CANDIDATE is not an ancestor of this branch"; exit 1; }
+          git merge-base --is-ancestor "$QUALTEST" HEAD || {
+            echo "::error::approved qualification-test commit $QUALTEST is missing"; exit 1; }
           test "$(git rev-parse "$CANDIDATE^{tree}")" = "$EXPECTED_TREE" || {
             echo "::error::candidate tree hash mismatch"; exit 1; }
-          CHANGED=$(git diff --name-only "$CANDIDATE"..HEAD -- app/ tests/ requirements.txt frontend/ docker-compose.yml Dockerfile)
+          # Above the approved qualification-test commit, only the workflow
+          # and qualification documentation may differ — application, tests,
+          # dependencies, frontend and deployment files must be byte-identical.
+          CHANGED=$(git diff --name-only "$QUALTEST"..HEAD -- app/ tests/ requirements.txt frontend/ docker-compose.yml Dockerfile)
           if [ -n "$CHANGED" ]; then
             echo "::error::qualification branch modifies application/test bytes:" $CHANGED
             exit 1
           fi
-          echo "Candidate verified: $CANDIDATE (tree $EXPECTED_TREE); branch adds workflow/docs only."
+          echo "Candidate verified: $CANDIDATE (tree $EXPECTED_TREE); qualification test $QUALTEST present; branch adds workflow/docs only."
 
       - name: Set up CPython 3.12
         uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
