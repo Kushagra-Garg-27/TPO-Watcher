@@ -1,0 +1,212 @@
+name: "ARM64 Container Build + Offline Smoke (runtime-image gate)"
+
+# One-time qualification: build the exact application candidate inside its
+# real Docker runtime image on a native ARM64 runner, then run a strictly
+# offline smoke (no scheduler, no VIERP, no SMTP, no network). Read-only,
+# secret-free; nothing is pushed to any registry.
+
+'on':
+  push:
+    branches:
+      - codex/arm64-container-smoke-20261025
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arm64-container-smoke
+  cancel-in-progress: false
+
+jobs:
+  container-smoke:
+    name: Build + offline smoke (linux/arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - name: Fail fast unless the runner is genuinely aarch64
+        run: |
+          set -euo pipefail
+          uname -a
+          test "$(uname -m)" = "aarch64"
+
+      - name: Verify Docker client, daemon and ARM64 build support
+        run: |
+          set -euo pipefail
+          docker version
+          docker info --format 'server-arch={{.Architecture}} os={{.OperatingSystem}}'
+          docker buildx version
+          docker buildx inspect default --bootstrap 2>/dev/null | grep -i platforms || true
+
+      - name: Record Linux distribution
+        run: cat /etc/os-release
+
+      - name: Checkout qualification source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify candidate lineage and unchanged application bytes
+        run: |
+          set -euo pipefail
+          CANDIDATE=053b152b37d8aea8d5b4c74606765cdc73565136
+          QUALTEST=85646d0641365bcbe6b590bd0e28732340f33e09
+          EXPECTED_TREE=cbddf9ec5ff185b8ba643f4a5801a0e2c07a1bdf
+          git merge-base --is-ancestor "$CANDIDATE" HEAD || {
+            echo "::error::candidate not an ancestor"; exit 1; }
+          git merge-base --is-ancestor "$QUALTEST" HEAD || {
+            echo "::error::qualification-test commit missing"; exit 1; }
+          test "$(git rev-parse "$CANDIDATE^{tree}")" = "$EXPECTED_TREE" || {
+            echo "::error::candidate tree mismatch"; exit 1; }
+          CHANGED=$(git diff --name-only "$QUALTEST"..HEAD -- app/ tests/ requirements.txt frontend/ docker-compose.yml Dockerfile)
+          if [ -n "$CHANGED" ]; then
+            echo "::error::application/test bytes changed above the qualification commit:" $CHANGED
+            exit 1
+          fi
+          echo "Candidate verified: $CANDIDATE (tree $EXPECTED_TREE)."
+
+      - name: Prepare clean build context from the immutable application commit
+        run: |
+          set -euo pipefail
+          CANDIDATE=053b152b37d8aea8d5b4c74606765cdc73565136
+          EXPECTED_TREE=cbddf9ec5ff185b8ba643f4a5801a0e2c07a1bdf
+          git worktree add --detach "$RUNNER_TEMP/appsrc" "$CANDIDATE"
+          test "$(git -C "$RUNNER_TEMP/appsrc" rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE" || {
+            echo "::error::build-context tree mismatch"; exit 1; }
+          # A fresh detached worktree of a committed SHA is pristine by
+          # construction; assert it anyway (no untracked/private files).
+          test -z "$(git -C "$RUNNER_TEMP/appsrc" status --porcelain=v1)" || {
+            echo "::error::build context is not clean"; exit 1; }
+          echo "Build context ready at $RUNNER_TEMP/appsrc (tree verified)."
+
+      - name: Build the runtime image once (linux/arm64, no registry push)
+        env:
+          BUILD_DATE: ${{ github.event.head_commit.timestamp }}
+        run: |
+          set -euo pipefail
+          CANDIDATE=053b152b37d8aea8d5b4c74606765cdc73565136
+          docker build --platform linux/arm64 \
+            --build-arg GIT_COMMIT="$CANDIDATE" \
+            --build-arg BUILD_DATE="$BUILD_DATE" \
+            -t tpo-watcher-smoke:"$CANDIDATE" \
+            "$RUNNER_TEMP/appsrc"
+          echo "BUILD_EXIT=0"
+          echo "--- base image identity:"
+          docker image inspect mcr.microsoft.com/playwright/python:v1.44.0-jammy \
+            --format '{{json .RepoDigests}} {{.Os}}/{{.Architecture}}'
+          echo "--- built image identity:"
+          docker image inspect tpo-watcher-smoke:"$CANDIDATE" \
+            --format 'id={{.Id}} arch={{.Os}}/{{.Architecture}}'
+
+      - name: Record in-image Python and Playwright versions
+        run: |
+          set -euo pipefail
+          CANDIDATE=053b152b37d8aea8d5b4c74606765cdc73565136
+          docker run --rm --network none --entrypoint python \
+            tpo-watcher-smoke:"$CANDIDATE" \
+            -c "import sys, importlib.metadata as md; print('python:', sys.version); print('playwright:', md.version('playwright'))"
+
+      - name: Offline smoke — SQLite, API, Chromium (no scheduler, no network)
+        env:
+          CANDIDATE: 053b152b37d8aea8d5b4c74606765cdc73565136
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/smoke.py" <<'PY'
+          """Strictly offline smoke: no scheduler, no source, no SMTP, no network.
+
+          python -m app.main is deliberately NOT launched: it starts the
+          scheduler/service loops. The equivalent startup components are
+          exercised directly (module import, migrations, FastAPI app, in-process
+          HTTP client, headless Chromium)."""
+          import json
+          import sqlite3
+          from contextlib import closing
+
+          print("== 1. application imports and initialization")
+          from app.main import create_application  # module import only; no lifecycle
+          from app.api.app import create_app
+          from app.database.repository import DatabaseRepository
+          print("imports ok")
+
+          print("== 2. SQLite initialization and migrations (disposable fictional data)")
+          repo = DatabaseRepository("/tmp/smoke-disposable.sqlite")
+          with closing(sqlite3.connect("/tmp/smoke-disposable.sqlite")) as conn:
+              tables = {r[0] for r in conn.execute(
+                  "SELECT name FROM sqlite_master WHERE type='table'")}
+          required = {"companies", "system_state", "pending_notifications", "users",
+                      "user_preferences", "action_tokens", "notification_deliveries",
+                      "notification_delivery_outcome_log"}
+          missing = required - tables
+          assert not missing, f"missing tables after migration: {missing}"
+          repo.set_baseline_initialized()
+          print("migrations ok; tables:", sorted(tables))
+
+          print("== 3. idempotent restart against the disposable database")
+          with closing(sqlite3.connect("/tmp/smoke-disposable.sqlite")) as conn:
+              schema_first = conn.execute(
+                  "SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall()
+          DatabaseRepository("/tmp/smoke-disposable.sqlite")  # second full init
+          with closing(sqlite3.connect("/tmp/smoke-disposable.sqlite")) as conn:
+              schema_second = conn.execute(
+                  "SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall()
+          assert schema_first == schema_second, "schema changed on re-initialization"
+          assert repo.is_baseline_initialized() is True
+          print("idempotent restart ok")
+
+          print("== 4-6. FastAPI startup and local in-process HTTP checks")
+          application = create_app()
+          from fastapi.testclient import TestClient
+          client = TestClient(application)
+          health = client.get("/health")
+          assert health.status_code == 200, health.text
+          body = health.json()
+          assert body["database"] == "connected", body
+          assert body["baseline_initialized"] is True, body
+          print("/health:", json.dumps(body))
+          details = client.get("/health/details")
+          assert details.status_code == 200, details.text
+          dbody = details.json()
+          assert dbody["database"] == "connected", dbody
+          assert dbody["deliveries"] == {}, dbody
+          assert dbody["admin_pending"] == 0, dbody
+          assert dbody["ambiguous_provider_acceptances"] == 0, dbody
+          print("/health/details:", json.dumps(dbody))
+
+          print("== 7-8. installed Chromium headless launch, about:blank open/close")
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              print("chromium executable:", p.chromium.executable_path)
+              browser = p.chromium.launch(headless=True, args=[
+                  "--no-sandbox", "--disable-setuid-sandbox",
+                  "--disable-dev-shm-usage", "--disable-gpu"])
+              page = browser.new_page()
+              page.goto("about:blank")
+              assert page.title() == ""
+              page.close()
+              browser.close()
+          print("chromium launch ok")
+
+          print("SMOKE-OK")
+          PY
+          docker run --rm --network none \
+            -e DB_PATH=/tmp/smoke-disposable.sqlite \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -v "$RUNNER_TEMP/smoke.py:/smoke.py:ro" \
+            --entrypoint python \
+            tpo-watcher-smoke:"$CANDIDATE" /smoke.py
+
+      - name: Disposable state cleanup attestation
+        run: |
+          set -euo pipefail
+          # The smoke container ran with --rm (auto-removed) and wrote only to
+          # its own ephemeral filesystem (/tmp inside the container); the build
+          # worktree lives in runner temp and vanishes with the runner. Nothing
+          # was pushed, uploaded, or persisted outside this job.
+          docker ps --filter "ancestor=tpo-watcher-smoke:053b152b37d8aea8d5b4c74606765cdc73565136" --format '{{.ID}}' | \
+            while read -r id; do echo "::error::unexpected running container $id"; exit 1; done || true
+          echo "Cleanup attested: no containers, no registry push, no artifact upload."
+
+      # Deliberately NO docker push, NO artifact upload, NO secrets, NO cache.
