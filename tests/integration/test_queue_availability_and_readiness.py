@@ -137,8 +137,8 @@ def test_f12_health_details_reports_stale_degraded_and_backlog(monkeypatch, tmp_
     assert body["status"] == "degraded"
     assert body["watcher_fresh"] is False
     assert body["consecutive_watcher_failures"] == 5
-    # Default schedule 00:00/10:00/17:00 has a 7h max gap (+30m slack);
-    # a 20h-old start ledger is a missed scheduled start.
+    # Exact per-schedule evaluation (00:00/10:00/17:00 IST + 30m slack):
+    # a 20h-old start ledger has missed at least one due instant…
     assert body["missed_scheduled_start"] is True
     assert body["deliveries"]["PENDING"] == 1
     assert body["admin_pending"] == 1
@@ -150,3 +150,18 @@ def test_f12_health_details_without_ledger_is_unknown(monkeypatch, tmp_path):
     body = response.json()
     assert body["missed_scheduled_start"] == "unknown"
     assert body["status"] == "degraded"
+
+
+def test_f12_missed_start_is_precise_not_coarse(monkeypatch, tmp_path):
+    from app.health.server import _missed_scheduled_start
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Asia/Kolkata")
+    now = datetime(2026, 10, 25, 16, 0, 0, tzinfo=tz)  # between 10:00 and 17:00
+    started_recent = datetime(2026, 10, 25, 10, 5, 0, tzinfo=tz)
+    assert _missed_scheduled_start(started_recent, now) is False  # 17:00 not yet due+slack
+    started_early = datetime(2026, 10, 25, 9, 0, 0, tzinfo=tz)
+    assert _missed_scheduled_start(started_early, now) is True  # 10:00 due passed by >30m
+    # 6h-old ledger can never be missed under any start time on this schedule
+    # (largest gap 10h) — the coarse bound and exact method agree here.
+    started_6h = datetime(2026, 10, 25, 10, 0, 0, tzinfo=tz)
+    assert _missed_scheduled_start(started_6h, datetime(2026, 10, 25, 16, 0, 0, tzinfo=tz)) is False

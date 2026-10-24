@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     # Optional External Heartbeat Check-in URL
     HEALTHCHECK_WATCHER_URL: Optional[str] = None
 
+    # Independent subscriber-queue drain cadence in seconds. 0 (default)
+    # DISABLES the independent drain: obligations then progress only inside
+    # scheduled checks. Enabling it lets queued mail dispatch while the source
+    # is stale; because no undelivered-NEW age threshold has been approved,
+    # enabling requires an explicit deployment decision accepting current
+    # freshness semantics (stored-active plus consent checks only).
+    DELIVERY_DRAIN_INTERVAL_SECONDS: float = 0.0
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     def get_target_programs_list(self) -> List[str]:

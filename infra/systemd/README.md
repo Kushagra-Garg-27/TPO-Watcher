@@ -111,6 +111,16 @@ sudo systemctl daemon-reload
 
 ---
 
+## Upload-overwrite honesty note
+
+The daily uploader chooses a unique random object key and performs an
+exact-key pre-check before upload. This makes silent overwrite of an existing
+backup vanishingly unlikely, but it is **not** an atomic conditional write
+(`aws s3 cp` has no `PutObject --if-none-match` semantics): a racing writer
+between pre-check and upload could still target the same random key only by
+collision. Upload-and-list therefore remains a weaker assurance level than an
+independently authorized restore drill, and the two must not be conflated.
+
 ## Monthly Restore Verification Runbook
 
 > [!CAUTION]

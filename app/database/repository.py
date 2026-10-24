@@ -175,14 +175,19 @@ class DatabaseRepository:
             return deactivated_ids
 
     def _upsert_company_conn(self, conn, record: CompanyRecord,
-                             is_new: bool = False, notified_at: Optional[datetime] = None):
-        """Upsert within a caller-owned transaction; the caller commits."""
+                             is_new: bool = False, notified_at: Optional[datetime] = None) -> bool:
+        """Upsert within a caller-owned transaction; the caller commits.
+
+        Returns whether the company already existed before this upsert, so
+        callers can make introduction-obligation decisions inside the same
+        serialized transaction."""
         now = datetime.now(timezone.utc)
         raw_json = record.model_dump_json()
 
         cid = str(record.id)
         existing_row = conn.execute("SELECT * FROM companies WHERE id = ?", (cid,)).fetchone()
         existing = dict(existing_row) if existing_row else None
+        existed = existing is not None
 
         first_seen = now if existing is None else existing["first_seen_at"]
         last_notified = notified_at.isoformat() if notified_at else (existing["last_notified_at"] if existing else None)
@@ -265,6 +270,7 @@ class DatabaseRepository:
             last_notified,
             raw_json
         ))
+        return existed
 
     def apply_company_event(self, record: CompanyRecord, *, is_new: bool = False,
                             notification_type: Optional[str] = None,
@@ -276,15 +282,28 @@ class DatabaseRepository:
         with self._get_conn() as conn:
             if not conn.in_transaction:
                 conn.execute("BEGIN IMMEDIATE")
-            self._upsert_company_conn(conn, record, is_new=is_new)
+            existed = self._upsert_company_conn(conn, record, is_new=is_new)
             if notification_type is not None:
-                now = datetime.now(timezone.utc).isoformat()
-                conn.execute("""
-                    INSERT INTO pending_notifications
-                        (company_id, notification_type, changes_json, created_at, event_snapshot_json)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (str(record.id), notification_type, json.dumps(changes or []),
-                      now, event_snapshot if event_snapshot is not None else record.model_dump_json()))
+                snapshot = event_snapshot if event_snapshot is not None else record.model_dump_json()
+                # Concurrent-writer idempotency (F05): inside this serialized
+                # write transaction, a NEW obligation is created only by the
+                # transition that actually introduced the company row, and an
+                # identical pending obligation (same event snapshot) is never
+                # duplicated. Overlapping writers therefore converge on
+                # exactly one obligation per distinct event.
+                if notification_type == "NEW" and existed:
+                    pass
+                elif conn.execute(
+                        """SELECT 1 FROM pending_notifications
+                           WHERE company_id=? AND notification_type=? AND event_snapshot_json IS ?""",
+                        (str(record.id), notification_type, snapshot)).fetchone() is None:
+                    now = datetime.now(timezone.utc).isoformat()
+                    conn.execute("""
+                        INSERT INTO pending_notifications
+                            (company_id, notification_type, changes_json, created_at, event_snapshot_json)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (str(record.id), notification_type, json.dumps(changes or []),
+                          now, snapshot))
             conn.commit()
 
     def upsert_company(self, record: CompanyRecord, is_new: bool = False, notified_at: Optional[datetime] = None):

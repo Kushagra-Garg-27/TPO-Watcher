@@ -319,13 +319,36 @@ class PlacementWatcher:
             logger.error("Independent delivery drain iteration failed (%s).", type(e).__name__)
             return 0
 
-    async def run_delivery_loop(self, *, interval_seconds: float = 60.0):
-        """Bounded independent queue lifecycle: at most one batch per tick."""
-        logger.info("Independent subscriber delivery drain active (interval %.0fs).", interval_seconds)
+    @staticmethod
+    def _delivery_drain_interval(explicit=None):
+        """F04/F10 deployment gate: the independent drain is default-OFF (0).
+        A positive interval opts in; None means disabled."""
+        value = explicit if explicit is not None else getattr(
+            settings, "DELIVERY_DRAIN_INTERVAL_SECONDS", 0.0)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    async def run_delivery_loop(self, *, interval_seconds: float = None):
+        """Bounded independent queue lifecycle: at most one batch per tick.
+
+        Disabled unless DELIVERY_DRAIN_INTERVAL_SECONDS (or an explicit
+        interval) is positive — the stale-NEW age policy is undecided, so the
+        safe default keeps dispatch coupled to scheduled checks."""
+        interval = self._delivery_drain_interval(interval_seconds)
+        if interval is None:
+            logger.info(
+                "Independent subscriber delivery drain is disabled"
+                " (DELIVERY_DRAIN_INTERVAL_SECONDS<=0); the queue drains only"
+                " within scheduled checks.")
+            return
+        logger.info("Independent subscriber delivery drain active (interval %.0fs).", interval)
         while True:
             try:
                 await self.drain_once()
-                await asyncio.sleep(interval_seconds)
+                await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 logger.info("Independent delivery drain stopped.")
                 break

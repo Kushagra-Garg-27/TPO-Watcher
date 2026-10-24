@@ -1,6 +1,6 @@
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 from fastapi import APIRouter, status, Request
 from fastapi.responses import JSONResponse
@@ -75,25 +75,31 @@ def health_check(request: Request) -> Dict[str, Any]:
     }
 
 
-def _scheduled_start_gap_bound() -> Optional[int]:
-    """Largest gap (seconds) between configured check times, plus a 30-minute
-    slack, bounding when a scheduled start is considered missed."""
+def _missed_scheduled_start(started, now) -> Optional[bool]:
+    """Exact per-schedule missed-start evaluation.
+
+    Computes the first configured check instant strictly AFTER the last
+    recorded start and reports missed only once now exceeds that instant by
+    the 30-minute slack — evaluating the actual configured schedule (default
+    00:00/10:00/17:00 IST), not a coarse maximum-gap estimate."""
     try:
+        from zoneinfo import ZoneInfo
         from app.config import settings
         from app.monitoring.scheduler import parse_time_str
+        tz = ZoneInfo(settings.TIMEZONE)
         times = sorted(parse_time_str(t) for t in settings.get_check_times_list())
         if not times:
             return None
     except Exception:
         return None
-    gaps = []
-    for index, current in enumerate(times):
-        following = times[(index + 1) % len(times)]
-        delta = (following.hour * 3600 + following.minute * 60) - (current.hour * 3600 + current.minute * 60)
-        if delta <= 0:
-            delta += 24 * 3600
-        gaps.append(delta)
-    return max(gaps) + 1800
+    local_start = started.astimezone(tz)
+    for day_offset in (0, 1, 2):
+        base = local_start.date() + timedelta(days=day_offset)
+        for scheduled in times:
+            candidate = datetime.combine(base, scheduled, tzinfo=tz)
+            if candidate > started:
+                return now > candidate + timedelta(seconds=1800)
+    return None
 
 
 @router.get("/health/details")
@@ -147,9 +153,7 @@ def health_details(request: Request) -> Dict[str, Any]:
             detail["last_scheduled_check_started"] = started.isoformat() if started else None
             missed = "unknown"
             if started is not None:
-                bound = _scheduled_start_gap_bound()
-                if bound:
-                    missed = (now - started).total_seconds() > bound
+                missed = _missed_scheduled_start(started, now)
             detail["missed_scheduled_start"] = missed
 
             try:
