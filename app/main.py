@@ -72,6 +72,7 @@ async def main():
             await asyncio.gather(
                 watcher.run_forever(),
                 watcher.run_pruning_loop(),
+                watcher.run_delivery_loop(),
                 server.serve()
             )
     except KeyboardInterrupt:

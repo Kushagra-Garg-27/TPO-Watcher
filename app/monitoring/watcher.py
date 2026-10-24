@@ -126,15 +126,22 @@ class PlacementWatcher:
                     self.db.set_system_state(receipt_key, "complete")
 
                 success = False
+                # F10: the synchronous provider call runs off the shared event
+                # loop; transport latency cannot stall API/scheduler progress.
                 if notif["notification_type"] == "NEW":
                     target_match = self._matches_target(company_dict)
                     event_at_iso = company_dict.get("first_seen_at")
                     try:
-                        success = self.notifier.send_new_company_notification(record, target_match, event_at=event_at_iso)
+                        success = await asyncio.to_thread(
+                            self.notifier.send_new_company_notification,
+                            record, target_match, event_at=event_at_iso)
                     except TypeError:
-                        success = self.notifier.send_new_company_notification(record, target_match)
+                        success = await asyncio.to_thread(
+                            self.notifier.send_new_company_notification, record, target_match)
                 elif notif["notification_type"] == "UPDATE":
-                    success = self.notifier.send_update_notification(record, json.loads(notif["changes_json"]))
+                    success = await asyncio.to_thread(
+                        self.notifier.send_update_notification,
+                        record, json.loads(notif["changes_json"]))
                 if success:
                     self.db.mark_notified(record.id)
                     self.db.remove_pending_notification(notif["id"])
@@ -178,6 +185,9 @@ class PlacementWatcher:
                 client = TPOClient(self.auth.context, page)
                 companies = await client.fetch_companies()
                 logger.info(f"API request succeeded. Retrieved {len(companies)} companies.")
+                # F12: surface accepted-but-empty observations instead of only
+                # a green heartbeat.
+                self.db.set_system_state("last_observation_company_count", str(len(companies)))
                 
                 # 3. Process data (Detects and adds to pending_notifications)
                 result = self.detector.process_fetched_companies(companies)
@@ -194,6 +204,8 @@ class PlacementWatcher:
                 pending_count = len(self.db.get_pending_notifications())
                 logger.info(f"Pending admin notifications in queue: {pending_count}")
                 notifications_complete = await self._process_notifications()
+                self.db.set_system_state(
+                    "last_admin_drain_complete", "true" if notifications_complete else "false")
 
                 # 5. Process student subscriber deliveries via recoverable lease worker
                 delivered_subs = await self.delivery_worker.process_batch_once()
@@ -295,6 +307,29 @@ class PlacementWatcher:
                 logger.error(f"Unexpected error in pruning scheduling loop: {e}")
                 await asyncio.sleep(60)
 
+    async def drain_once(self) -> int:
+        """F10: one bounded drain tick, independent of source-check success.
+
+        Existing obligations keep progressing while VIERP is unavailable. All
+        claim fencing, consent, cohort and freshness checks still apply per
+        delivery; nothing here contacts the source."""
+        try:
+            return await self.delivery_worker.process_batch_once()
+        except Exception as e:
+            logger.error("Independent delivery drain iteration failed (%s).", type(e).__name__)
+            return 0
+
+    async def run_delivery_loop(self, *, interval_seconds: float = 60.0):
+        """Bounded independent queue lifecycle: at most one batch per tick."""
+        logger.info("Independent subscriber delivery drain active (interval %.0fs).", interval_seconds)
+        while True:
+            try:
+                await self.drain_once()
+                await asyncio.sleep(interval_seconds)
+            except asyncio.CancelledError:
+                logger.info("Independent delivery drain stopped.")
+                break
+
     async def run_forever(self):
         if self.notification_pipeline is not None:
             from app.database.event_repository import PolicyDenied
@@ -316,6 +351,12 @@ class PlacementWatcher:
                     await asyncio.sleep(wait_seconds)
                     
                 logger.info("Starting scheduled TPO check...")
+                # F12: durable missed-start ledger. A gap here distinguishes
+                # "scheduler never started a cycle" from "cycle started and
+                # failed" without inducing any catch-up polling.
+                self.db.set_system_state(
+                    "last_scheduled_check_started",
+                    datetime.now(timezone.utc).isoformat())
                 succeeded = await self.check_once()
                 if succeeded:
                     logger.info("TPO check completed successfully.")

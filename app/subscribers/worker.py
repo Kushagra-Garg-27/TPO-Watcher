@@ -49,6 +49,13 @@ class DeliveryWorker:
         self.send_interval_seconds = send_interval_seconds
         self._is_running = False
 
+    def _surface_ambiguity(self, delivery_id) -> None:
+        """F04: durable ambiguity marker; best-effort and never a resend trigger."""
+        try:
+            self.delivery_repo.record_ambiguous_acceptance(delivery_id)
+        except Exception:
+            logger.error("Could not record the ambiguous-acceptance marker.")
+
     def _generate_token(self, user_id: int, token_type: str, expiry_delta: timedelta) -> str:
         raw_token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
@@ -302,29 +309,49 @@ class DeliveryWorker:
                     continue
 
                 # Send email directly to the student's email address
+                # F10: synchronous SMTP runs off the shared event loop.
                 success = False
                 if hasattr(self.notifier, "_send_email_to"):
                     try:
-                        success = self.notifier._send_email_to(
-                            user_email, subject, html_content, extra_headers=extra_headers, plain_content=plain_content
-                        )
+                        success = await asyncio.to_thread(
+                            self.notifier._send_email_to,
+                            user_email, subject, html_content,
+                            extra_headers=extra_headers, plain_content=plain_content)
                     except TypeError:
-                        success = self.notifier._send_email_to(
-                            user_email, subject, html_content, extra_headers=extra_headers
-                        )
+                        success = await asyncio.to_thread(
+                            self.notifier._send_email_to,
+                            user_email, subject, html_content, extra_headers=extra_headers)
                 else:
                     # Use fallback helper if method doesn't exist
-                    success = self._send_smtp_email(
-                        user_email, subject, html_content, extra_headers=extra_headers, plain_content=plain_content
-                    )
+                    success = await asyncio.to_thread(
+                        self._send_smtp_email,
+                        user_email, subject, html_content,
+                        extra_headers=extra_headers, plain_content=plain_content)
 
                 if success:
-                    acknowledged = self.delivery_repo.mark_sent(delivery_id)
-                    if acknowledged:
-                        delivered_count += 1
-                        logger.info("Provider accepted notification %s; claim acknowledgment recorded.", delivery_id)
+                    try:
+                        acknowledged = self.delivery_repo.mark_sent(delivery_id)
+                    except Exception:
+                        # F04: provider acceptance is already fact; a failed
+                        # database acknowledgment is surfaced durably and the
+                        # claim is released for lease recovery. Never resend
+                        # automatically from this signal alone.
+                        self._surface_ambiguity(delivery_id)
+                        logger.warning(
+                            "Provider accepted notification %s but its acknowledgment raised; acceptance is unacknowledged.",
+                            delivery_id)
+                        try:
+                            self.delivery_repo.release_failed(
+                                delivery_id, "acknowledgment_failed_after_acceptance")
+                        except Exception:
+                            logger.error("Claim release after a failed acknowledgment did not complete.")
                     else:
-                        logger.warning("Provider accepted notification %s after claim loss; acceptance is unacknowledged.", delivery_id)
+                        if acknowledged:
+                            delivered_count += 1
+                            logger.info("Provider accepted notification %s; claim acknowledgment recorded.", delivery_id)
+                        else:
+                            self._surface_ambiguity(delivery_id)
+                            logger.warning("Provider accepted notification %s after claim loss; acceptance is unacknowledged.", delivery_id)
                 else:
                     self.delivery_repo.release_failed(delivery_id, "SMTP dispatch returned False")
                     logger.warning("Provider did not accept notification %s.", delivery_id)

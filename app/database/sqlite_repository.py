@@ -621,6 +621,17 @@ class SQLiteDeliveryRepository(SQLiteBaseRepository):
             conn.commit()
             return cursor.rowcount == 1
 
+    def record_ambiguous_acceptance(self, delivery_id: int) -> None:
+        """F04: durable, bounded marker that a provider accepted a message the
+        database could not acknowledge. Operational signal only — never a
+        resend trigger."""
+        with self._get_conn() as conn:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute("""INSERT INTO system_state(key,value,updated_at) VALUES(?,?,?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",
+                ("notification:v1:ambiguous_acceptance:" + str(int(delivery_id)), now, now))
+            conn.commit()
+
     def current_delivery_context(self, delivery_id: int) -> Optional[Dict[str, Any]]:
         """Check authority and current consent/source state just before transport.
 
