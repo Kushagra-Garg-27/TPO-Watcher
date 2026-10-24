@@ -74,115 +74,86 @@ class PlacementWatcher:
                 return True
         return False
 
+    @staticmethod
+    def _notification_record(company_dict, event_snapshot=None):
+        """F07: render from the durable event-time snapshot first. Legacy
+        obligations without a snapshot keep the established legacy-column
+        fallback to the current stored row."""
+        if event_snapshot:
+            try:
+                raw = json.loads(event_snapshot)
+                if isinstance(raw, dict):
+                    return CompanyRecord(**{**raw, "id": company_dict["id"], "company": company_dict["company"]})
+            except (TypeError, ValueError):
+                pass
+        try:
+            raw = json.loads(company_dict.get("raw_data_json") or "null")
+            if not isinstance(raw, dict):
+                raise ValueError("source object unavailable")
+            return CompanyRecord(**{**raw, "id": company_dict["id"], "company": company_dict["company"]})
+        except (TypeError, ValueError):
+            fields = {
+                "company_code": "company_code", "regStartdate": "registration_start",
+                "regEnddate": "registration_end", "maxPackage": "max_package",
+                "minPackage": "min_package", "placementtype": "placement_type",
+                "academicyear": "academic_year", "companytype": "company_type",
+                "internshiptype": "internship_type", "skill": "skills",
+                "tpoprogram": "eligible_programs", "organization": "organizations", "isactive": "is_active",
+            }
+            return CompanyRecord(id=company_dict["id"], company=company_dict["company"],
+                **{field: company_dict.get(column) for field, column in fields.items()})
+
     async def _process_notifications(self):
         from app.monitoring.runtime_supervisor import current_runtime
         from app.database.event_repository import PolicyDenied
         if current_runtime(self.db.db_path) is not None:
             raise PolicyDenied('guarded runtime excludes legacy administrative drain')
         pending = self.db.get_pending_notifications()
-        if not pending:
-            return
-            
-        logger.info(f"Processing {len(pending)} pending notifications...")
-        
+        complete = True
         for notif in pending:
-            company_dict = self.db.get_company(notif["company_id"])
-            if not company_dict:
-                logger.error(f"Company {notif['company_id']} not found for notification {notif['id']}. Removing.")
-                self.db.remove_pending_notification(notif["id"])
-                continue
-                
-            raw_json = company_dict.get("raw_data_json")
-            if raw_json:
-                try:
-                    raw = json.loads(raw_json)
-                    # F09: Reconstruct from raw_data_json to preserve time-only fields
-                    # (regStarttime, regEndtime) which are NOT stored in flattened columns.
-                    record = CompanyRecord(
-                        id=company_dict["id"],
-                        company=company_dict["company"],
-                        company_code=raw.get("company_code") or company_dict.get("company_code"),
-                        regStartdate=raw.get("regStartdate"),
-                        regStarttime=raw.get("regStarttime"),  # F09: from raw
-                        regEnddate=raw.get("regEnddate"),
-                        regEndtime=raw.get("regEndtime"),      # F09: from raw
-                        maxPackage=raw.get("maxPackage") or company_dict.get("max_package"),
-                        minPackage=raw.get("minPackage") or company_dict.get("min_package"),
-                        placementtype=raw.get("placementtype") or company_dict.get("placement_type"),
-                        academicyear=raw.get("academicyear") or company_dict.get("academic_year"),
-                        companytype=raw.get("companytype") or company_dict.get("company_type"),
-                        internshiptype=raw.get("internshiptype") or company_dict.get("internship_type"),
-                        skill=raw.get("skill") or company_dict.get("skills"),
-                        tpoprogram=raw.get("tpoprogram") or company_dict.get("eligible_programs"),
-                        programnew=raw.get("programnew"),
-                        organization=raw.get("organization") or company_dict.get("organizations"),
-                        isactive=raw.get("isactive") or company_dict.get("is_active"),
-                    )
-                except Exception:
-                    raw = {}
-                    record = CompanyRecord(
-                        id=company_dict["id"],
-                        company=company_dict["company"],
-                        company_code=company_dict.get("company_code"),
-                        regStartdate=company_dict.get("registration_start"),
-                        regEnddate=company_dict.get("registration_end"),
-                        maxPackage=company_dict.get("max_package"),
-                        minPackage=company_dict.get("min_package"),
-                        placementtype=company_dict.get("placement_type"),
-                        academicyear=company_dict.get("academic_year"),
-                        companytype=company_dict.get("company_type"),
-                        internshiptype=company_dict.get("internship_type"),
-                        skill=company_dict.get("skills"),
-                        tpoprogram=company_dict.get("eligible_programs"),
-                        organization=company_dict.get("organizations"),
-                        isactive=company_dict.get("is_active"),
-                    )
-            else:
-                record = CompanyRecord(
-                    id=company_dict["id"],
-                    company=company_dict["company"],
-                    company_code=company_dict.get("company_code"),
-                    regStartdate=company_dict.get("registration_start"),
-                    regEnddate=company_dict.get("registration_end"),
-                    maxPackage=company_dict.get("max_package"),
-                    minPackage=company_dict.get("min_package"),
-                    placementtype=company_dict.get("placement_type"),
-                    academicyear=company_dict.get("academic_year"),
-                    companytype=company_dict.get("company_type"),
-                    internshiptype=company_dict.get("internship_type"),
-                    skill=company_dict.get("skills"),
-                    tpoprogram=company_dict.get("eligible_programs"),
-                    organization=company_dict.get("organizations"),
-                    isactive=company_dict.get("is_active"),
-                )
+            try:
+                company_dict = self.db.get_company(notif["company_id"])
+                if not company_dict:
+                    self.db.remove_pending_notification(notif["id"])
+                    continue
+                record = self._notification_record(company_dict, notif.get("event_snapshot_json"))
+                receipt_key = f"notification:v1:fanout:{notif['id']}"
+                if self.db.get_system_state(receipt_key) != "complete":
+                    # Existing persisted obligations are replayed even when the
+                    # next source poll has no DetectionResult changes. Admin
+                    # acknowledgment cannot delete work before fanout commits.
+                    self.fanout.dispatch_opportunity(record, notif["notification_type"])
+                    self.db.set_system_state(receipt_key, "complete")
 
-            
-            success = False
-            if notif["notification_type"] == "NEW":
-                target_match = self._matches_target(company_dict)
-                # F11: pass event-time (first_seen_at) so admin email clock
-                # reflects when the opportunity was detected, not rendered.
-                # Fall back gracefully for duck-typed notifiers (e.g. test
-                # FakeNotifier) that only accept positional (company, target_match).
-                event_at_iso = company_dict.get("first_seen_at")
-                try:
-                    success = self.notifier.send_new_company_notification(
-                        record, target_match, event_at=event_at_iso
-                    )
-                except TypeError:
-                    success = self.notifier.send_new_company_notification(record, target_match)
-            elif notif["notification_type"] == "UPDATE":
-                changes = json.loads(notif["changes_json"])
-                success = self.notifier.send_update_notification(record, changes)
-
-
-                
-            if success:
-                self.db.mark_notified(record.id)
-                self.db.remove_pending_notification(notif["id"])
-                logger.info(f"Notification successfully delivered for {record.company} (ID: {record.id}). Status: SENT.")
-            else:
-                logger.warning(f"Failed to deliver notification for {record.company} (ID: {record.id}). Remains PENDING.")
+                success = False
+                # F10: the synchronous provider call runs off the shared event
+                # loop; transport latency cannot stall API/scheduler progress.
+                if notif["notification_type"] == "NEW":
+                    target_match = self._matches_target(company_dict)
+                    event_at_iso = company_dict.get("first_seen_at")
+                    try:
+                        success = await asyncio.to_thread(
+                            self.notifier.send_new_company_notification,
+                            record, target_match, event_at=event_at_iso)
+                    except TypeError:
+                        success = await asyncio.to_thread(
+                            self.notifier.send_new_company_notification, record, target_match)
+                elif notif["notification_type"] == "UPDATE":
+                    success = await asyncio.to_thread(
+                        self.notifier.send_update_notification,
+                        record, json.loads(notif["changes_json"]))
+                if success:
+                    self.db.mark_notified(record.id)
+                    self.db.remove_pending_notification(notif["id"])
+                    logger.info("Provider accepted admin notification %s; acknowledgment recorded.", notif["id"])
+                else:
+                    logger.warning("Admin notification %s remains pending.", notif["id"])
+            except Exception as exc:
+                # A fanout/admin/ack failure keeps this durable obligation and
+                # permits other admins and the student drain to make progress.
+                complete = False
+                logger.error("Notification %s remains pending (%s).", notif["id"], type(exc).__name__)
+        return complete
 
     async def check_once(self):
         """Performs a single check iteration with automatic re-authentication recovery."""
@@ -214,17 +185,16 @@ class PlacementWatcher:
                 client = TPOClient(self.auth.context, page)
                 companies = await client.fetch_companies()
                 logger.info(f"API request succeeded. Retrieved {len(companies)} companies.")
+                # F12: surface accepted-but-empty observations instead of only
+                # a green heartbeat.
+                self.db.set_system_state("last_observation_company_count", str(len(companies)))
                 
                 # 3. Process data (Detects and adds to pending_notifications)
                 result = self.detector.process_fetched_companies(companies)
                 if result.new_companies:
                     logger.info(f"Newly detected companies ({len(result.new_companies)}): {[f'{c.company} (ID: {c.id})' for c in result.new_companies]}")
-                    for nc in result.new_companies:
-                        self.fanout.dispatch_opportunity(nc, "NEW")
                 if result.updated_companies:
                     logger.info(f"Updated companies ({len(result.updated_companies)}): {[f'{c[0].company} (ID: {c[0].id})' for c in result.updated_companies]}")
-                    for uc, changes in result.updated_companies:
-                        self.fanout.dispatch_opportunity(uc, "UPDATE")
                 if result.deactivated_companies:
                     logger.info(f"Reconciled/deactivated companies absent from feed ({len(result.deactivated_companies)}): {result.deactivated_companies}")
                 if not result.new_companies and not result.updated_companies and not result.deactivated_companies:
@@ -233,13 +203,21 @@ class PlacementWatcher:
                 # 4. Process pending admin notifications (Independent safety channel preserved)
                 pending_count = len(self.db.get_pending_notifications())
                 logger.info(f"Pending admin notifications in queue: {pending_count}")
-                await self._process_notifications()
+                notifications_complete = await self._process_notifications()
+                self.db.set_system_state(
+                    "last_admin_drain_complete", "true" if notifications_complete else "false")
 
                 # 5. Process student subscriber deliveries via recoverable lease worker
                 delivered_subs = await self.delivery_worker.process_batch_once()
                 if delivered_subs > 0:
                     logger.info(f"Dispatched {delivered_subs} student subscriber notifications.")
                 
+                # Legacy overrides return None after completing normally;
+                # the recoverable drain reports an explicit False on failure.
+                if notifications_complete is False:
+                    self.record_heartbeat_failure()
+                    send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
+                    return False
                 logger.info("Check iteration complete.")
                 self.record_heartbeat_success()
                 send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=True)
@@ -329,6 +307,52 @@ class PlacementWatcher:
                 logger.error(f"Unexpected error in pruning scheduling loop: {e}")
                 await asyncio.sleep(60)
 
+    async def drain_once(self) -> int:
+        """F10: one bounded drain tick, independent of source-check success.
+
+        Existing obligations keep progressing while VIERP is unavailable. All
+        claim fencing, consent, cohort and freshness checks still apply per
+        delivery; nothing here contacts the source."""
+        try:
+            return await self.delivery_worker.process_batch_once()
+        except Exception as e:
+            logger.error("Independent delivery drain iteration failed (%s).", type(e).__name__)
+            return 0
+
+    @staticmethod
+    def _delivery_drain_interval(explicit=None):
+        """F04/F10 deployment gate: the independent drain is default-OFF (0).
+        A positive interval opts in; None means disabled."""
+        value = explicit if explicit is not None else getattr(
+            settings, "DELIVERY_DRAIN_INTERVAL_SECONDS", 0.0)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    async def run_delivery_loop(self, *, interval_seconds: float = None):
+        """Bounded independent queue lifecycle: at most one batch per tick.
+
+        Disabled unless DELIVERY_DRAIN_INTERVAL_SECONDS (or an explicit
+        interval) is positive — the stale-NEW age policy is undecided, so the
+        safe default keeps dispatch coupled to scheduled checks."""
+        interval = self._delivery_drain_interval(interval_seconds)
+        if interval is None:
+            logger.info(
+                "Independent subscriber delivery drain is disabled"
+                " (DELIVERY_DRAIN_INTERVAL_SECONDS<=0); the queue drains only"
+                " within scheduled checks.")
+            return
+        logger.info("Independent subscriber delivery drain active (interval %.0fs).", interval)
+        while True:
+            try:
+                await self.drain_once()
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                logger.info("Independent delivery drain stopped.")
+                break
+
     async def run_forever(self):
         if self.notification_pipeline is not None:
             from app.database.event_repository import PolicyDenied
@@ -350,6 +374,16 @@ class PlacementWatcher:
                     await asyncio.sleep(wait_seconds)
                     
                 logger.info("Starting scheduled TPO check...")
+                # F12: durable missed-start ledger. A gap here distinguishes
+                # "scheduler never started a cycle" from "cycle started and
+                # failed" without inducing any catch-up polling. A ledger
+                # failure must never prevent the check itself.
+                try:
+                    self.db.set_system_state(
+                        "last_scheduled_check_started",
+                        datetime.now(timezone.utc).isoformat())
+                except Exception:
+                    logger.warning("Could not record the scheduled-start ledger entry.")
                 succeeded = await self.check_once()
                 if succeeded:
                     logger.info("TPO check completed successfully.")

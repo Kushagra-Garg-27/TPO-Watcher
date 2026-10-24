@@ -47,7 +47,7 @@ export function HeroSection({ onSubscribeClick }: HeroSectionProps) {
                   NEVER MISS THE NEXT <span className="text-accent underline decoration-accent/40 decoration-2 underline-offset-4">OPPORTUNITY.</span>
                 </p>
                 <p className="mt-3 text-sm sm:text-base text-muted leading-relaxed font-sans font-light">
-                  Continuous automated intelligence for VIT Pune placement schedules.
+                  Scheduled automated intelligence for VIT Pune placement schedules.
                   When matching internships, PPOs, or full-time opportunities appear on VIERP, you know immediately.
                 </p>
               </div>

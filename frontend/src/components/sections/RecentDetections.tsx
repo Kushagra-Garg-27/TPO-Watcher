@@ -87,7 +87,7 @@ export function RecentDetections() {
           {!loading && !error && opportunities.length > 0 && (
             <FadeUp delay={0.2}>
               <span className="text-xs font-mono text-muted tracking-wider uppercase">
-                {opportunities.length} ACTIVE RECORD{opportunities.length !== 1 ? 'S' : ''} FROM PORTAL
+                {opportunities.length} STORED RECORD{opportunities.length !== 1 ? 'S' : ''} — CURRENT AVAILABILITY NOT VERIFIED
               </span>
             </FadeUp>
           )}
@@ -235,7 +235,7 @@ export function RecentDetections() {
         >
           <Building2 className="h-4 w-4 text-accent shrink-0" />
           <span>
-            Records are sourced live from the VIT TPO portal database. Compensation values are shown verbatim from source — unit (LPA / stipend) must be verified on the official portal.
+            Records are historical detections stored from past VIT TPO portal observations; they are not a live feed and current availability is not verified. Compensation values are shown verbatim from source — unit (LPA / stipend) must be verified on the official portal.
           </span>
         </motion.div>
       </div>

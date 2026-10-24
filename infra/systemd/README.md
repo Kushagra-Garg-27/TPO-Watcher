@@ -111,25 +111,40 @@ sudo systemctl daemon-reload
 
 ---
 
+## Upload-overwrite honesty note
+
+The daily uploader chooses a unique random object key and performs an
+exact-key pre-check before upload. This makes silent overwrite of an existing
+backup vanishingly unlikely, but it is **not** an atomic conditional write
+(`aws s3 cp` has no `PutObject --if-none-match` semantics): a racing writer
+between pre-check and upload could still target the same random key only by
+collision. Upload-and-list therefore remains a weaker assurance level than an
+independently authorized restore drill, and the two must not be conflated.
+
 ## Monthly Restore Verification Runbook
 
 > [!CAUTION]
 > The production EC2 instance profile has **NO** `s3:GetObject` permission by design (least privilege principle).
 > Monthly restore tests must be executed by an **OWNER/RECOVERY** identity with read access to the backup S3 bucket.
 
-1. **Download latest snapshot using recovery identity:**
+1. **Download the exact snapshot using the recovery identity** into a private
+   directory (never world-readable `/tmp`; use `install -d -m 700`):
    ```bash
-   aws s3 cp s3://<BACKUP_BUCKET>/backups/<snapshot_filename>.sqlite /tmp/test_restore.sqlite
+   install -d -m 700 ~/recovery-drill && cd ~/recovery-drill
+   aws s3 cp s3://<BACKUP_BUCKET>/backups/<snapshot_filename>.sqlite ./restore.sqlite
+   chmod 600 restore.sqlite
    ```
 
-2. **Run the Restore Validation Tool:**
+2. **Run the strictly read-only Restore Validation Tool:**
    ```bash
-   python -m scripts.restore_test /tmp/test_restore.sqlite
+   python -m scripts.restore_test ./restore.sqlite
    ```
+   The validator never initializes application repositories or migrations
+   against the copy — that would mutate the evidence under validation.
 
 3. **Verification Checklist:**
    - `PRAGMA integrity_check` reports `ok`
-   - All 7 core schema tables present
+   - All core schema tables present
    - Expected column structures match
-   - Repository read queries succeed
-   - File cleaned up: `rm /tmp/test_restore.sqlite`
+   - Representative read-only queries succeed
+   - Private copy removed after the drill: `rm ./restore.sqlite`

@@ -20,6 +20,17 @@ def run_migrations(db_path: str) -> None:
         conn.execute("PRAGMA busy_timeout = 5000;")
         conn.execute("PRAGMA foreign_keys = ON;")
 
+        # Shared V1 repositories also need the existing state table for durable
+        # claim ownership. Production already has this identical table; never
+        # rewrite its schema or data when standalone repositories initialize.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS system_state (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP
+            )
+        """)
+
         # 1. Users (subscribers restricted to 2028)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -103,6 +114,35 @@ def run_migrations(db_path: str) -> None:
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
+
+        # Migration: durable event-time snapshot on admin obligations (F07).
+        # Legacy rows keep NULL and fall back to current-row reconstruction;
+        # no historical snapshot is invented for existing rows.
+        cursor = conn.execute("PRAGMA table_info(pending_notifications);")
+        pending_cols = {row[1] for row in cursor.fetchall()}
+        if pending_cols and "event_snapshot_json" not in pending_cols:
+            try:
+                conn.execute("ALTER TABLE pending_notifications ADD COLUMN event_snapshot_json TEXT")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
+        # Additive append-only audit trail for terminal delivery outcomes (F06).
+        # A FAILED row may later accept a distinct event; its terminal history
+        # stays auditable here. Older workers neither read nor write this table.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS notification_delivery_outcome_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                delivery_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                company_id TEXT NOT NULL,
+                notification_type TEXT NOT NULL,
+                prior_status TEXT NOT NULL,
+                event_snapshot TEXT,
+                outcome_note TEXT,
+                recorded_at TIMESTAMP NOT NULL
+            )
+        """)
 
         conn.commit()
     logger.info("Database migrations applied successfully.")

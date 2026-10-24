@@ -10,6 +10,8 @@ from app.config import settings
 from app.database.interfaces import DeliveryRepositoryProtocol, TokenRepositoryProtocol
 from app.tpo.models import CompanyRecord
 from app.notifications.email import EmailNotificationProvider
+from app.subscribers.canonical import extract_eligible_canonical_branches
+from app.subscribers.matcher import SubscriptionMatcher
 from app.notifications.utils import escape_html, sanitize_url, render_safe_link
 from app.notifications.presentation import (
     format_opportunity_subject,
@@ -47,6 +49,13 @@ class DeliveryWorker:
         self.send_interval_seconds = send_interval_seconds
         self._is_running = False
 
+    def _surface_ambiguity(self, delivery_id) -> None:
+        """F04: durable ambiguity marker; best-effort and never a resend trigger."""
+        try:
+            self.delivery_repo.record_ambiguous_acceptance(delivery_id)
+        except Exception:
+            logger.error("Could not record the ambiguous-acceptance marker.")
+
     def _generate_token(self, user_id: int, token_type: str, expiry_delta: timedelta) -> str:
         raw_token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
@@ -58,6 +67,35 @@ class DeliveryWorker:
             expires_at=expires_at
         )
         return raw_token
+
+    @staticmethod
+    def _current_relevance(context, notif_type, snapshot):
+        if not context["is_active"] or not context["is_verified"] or context["graduation_year"] != 2028:
+            return False
+        # Only an explicit normalized inactive state suppresses a queued NEW.
+        # Unknown source flags and incomplete/empty feeds establish no absence.
+        if str(context["company_is_active"]).strip().lower() in ("false", "0", "no"):
+            if notif_type == "NEW":
+                return False
+            # Keep closure UPDATEs and immutable deadline evidence, but do not
+            # send an older UPDATE asserting active after a known closure.
+            if str(snapshot.isactive).strip().lower() in ("true", "1", "yes"):
+                return False
+        if not context['current_routing_available']:
+            # The standalone legacy queue supports minimal company schemas and
+            # already-enqueued recipient obligations. There is no current routing
+            # projection to recheck there. Preserve that explicit queue contract,
+            # while always rechecking live consent/cohort/preferences. The full
+            # production schema must pass the current source/routing check below.
+            return SubscriptionMatcher.matches_opportunity_preferences(
+                snapshot, bool(context['pref_internship']),
+                bool(context['pref_placement']), bool(context['pref_ppo']))
+        try:
+            current = CompanyRecord(**json.loads(context["current_company_json"]))
+        except (TypeError, ValueError):
+            return False
+        branches = extract_eligible_canonical_branches(current.tpoprogram, current.programnew, current.organization)
+        return SubscriptionMatcher.matches_subscriber(current, context, branches)
 
     def _format_opportunity_email(
         self,
@@ -190,7 +228,7 @@ class DeliveryWorker:
         # 1. Recover stale leases from crashed workers
         recovered = self.delivery_repo.recover_stale_leases()
         if recovered > 0:
-            logger.info(f"Recovered {recovered} stale delivery leases back to PENDING.")
+            logger.info(f"Recovered {recovered} stale delivery leases to retry or exhausted terminal state.")
 
         # 2. Claim pending batch
         deliveries = self.delivery_repo.claim_pending_batch(
@@ -260,34 +298,67 @@ class DeliveryWorker:
 
                 subject = format_opportunity_subject(notif_type, company.company)
 
+                # Check after rendering/token work and immediately before the
+                # external boundary. A lease may expire while a batch is paced.
+                context = self.delivery_repo.current_delivery_context(delivery_id)
+                if context is None:
+                    logger.info("Delivery %s lost its claim before transport.", delivery_id)
+                    continue
+                if not self._current_relevance(context, notif_type, company):
+                    self.delivery_repo.release_failed(delivery_id, "Current consent or opportunity relevance no longer permits delivery", terminal=True)
+                    continue
+
                 # Send email directly to the student's email address
+                # F10: synchronous SMTP runs off the shared event loop.
                 success = False
                 if hasattr(self.notifier, "_send_email_to"):
                     try:
-                        success = self.notifier._send_email_to(
-                            user_email, subject, html_content, extra_headers=extra_headers, plain_content=plain_content
-                        )
+                        success = await asyncio.to_thread(
+                            self.notifier._send_email_to,
+                            user_email, subject, html_content,
+                            extra_headers=extra_headers, plain_content=plain_content)
                     except TypeError:
-                        success = self.notifier._send_email_to(
-                            user_email, subject, html_content, extra_headers=extra_headers
-                        )
+                        success = await asyncio.to_thread(
+                            self.notifier._send_email_to,
+                            user_email, subject, html_content, extra_headers=extra_headers)
                 else:
                     # Use fallback helper if method doesn't exist
-                    success = self._send_smtp_email(
-                        user_email, subject, html_content, extra_headers=extra_headers, plain_content=plain_content
-                    )
+                    success = await asyncio.to_thread(
+                        self._send_smtp_email,
+                        user_email, subject, html_content,
+                        extra_headers=extra_headers, plain_content=plain_content)
 
                 if success:
-                    self.delivery_repo.mark_sent(delivery_id)
-                    delivered_count += 1
-                    logger.info(f"Delivered notification {delivery_id} to {user_email} for {company.company}")
+                    try:
+                        acknowledged = self.delivery_repo.mark_sent(delivery_id)
+                    except Exception:
+                        # F04: provider acceptance is already fact; a failed
+                        # database acknowledgment is surfaced durably and the
+                        # claim is released for lease recovery. Never resend
+                        # automatically from this signal alone.
+                        self._surface_ambiguity(delivery_id)
+                        logger.warning(
+                            "Provider accepted notification %s but its acknowledgment raised; acceptance is unacknowledged.",
+                            delivery_id)
+                        try:
+                            self.delivery_repo.release_failed(
+                                delivery_id, "acknowledgment_failed_after_acceptance")
+                        except Exception:
+                            logger.error("Claim release after a failed acknowledgment did not complete.")
+                    else:
+                        if acknowledged:
+                            delivered_count += 1
+                            logger.info("Provider accepted notification %s; claim acknowledgment recorded.", delivery_id)
+                        else:
+                            self._surface_ambiguity(delivery_id)
+                            logger.warning("Provider accepted notification %s after claim loss; acceptance is unacknowledged.", delivery_id)
                 else:
                     self.delivery_repo.release_failed(delivery_id, "SMTP dispatch returned False")
-                    logger.warning(f"Failed to deliver notification {delivery_id} to {user_email}")
+                    logger.warning("Provider did not accept notification %s.", delivery_id)
 
             except Exception as e:
-                logger.error(f"Error processing delivery {delivery_id}: {e}")
-                self.delivery_repo.release_failed(delivery_id, str(e))
+                logger.error("Error processing delivery %s (%s).", delivery_id, type(e).__name__)
+                self.delivery_repo.release_failed(delivery_id, "delivery_processing_failed")
 
             # Pacing delay between emails to respect SMTP burst limits
             await asyncio.sleep(self.send_interval_seconds)
@@ -438,5 +509,5 @@ class DeliveryWorker:
                 server.send_message(msg)
             return True
         except Exception as e:
-            logger.error(f"Direct SMTP send failed to {to_email}: {e}")
+            logger.error("Direct SMTP send failed (%s).", type(e).__name__)
             return False

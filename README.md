@@ -46,7 +46,10 @@ TIMEZONE=Asia/Kolkata
   CHECK_TIMES=08:00,12:00,16:00,20:00
   ```
 
-After changing `.env`, restart the container using `docker compose restart`.
+After changing `.env`, recreate the container so the new environment is
+actually injected (`docker compose up -d --force-recreate watcher`); a plain
+`docker compose restart` reuses the environment captured at container
+creation. Avoid recreating within 30 minutes of a scheduled check.
 
 ---
 

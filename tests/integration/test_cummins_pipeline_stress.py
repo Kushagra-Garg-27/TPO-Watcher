@@ -557,7 +557,12 @@ async def test_f10_queued_new_after_feed_deactivation_requires_freshness(audit_r
 
 
 @pytest.mark.asyncio
-async def test_full_no_reset_natural_cycle_characterization(audit_repo, monkeypatch):
+@pytest.mark.parametrize("replay_changes", [
+    {},
+    {"regEnddate": "2026-10-16"},
+    {"regEndtime": "18:00:00"},
+], ids=["unchanged", "equivalent-deadline-date", "equivalent-deadline-time"])
+async def test_full_no_reset_natural_cycle_characterization(audit_repo, monkeypatch, replay_changes):
     add_user(audit_repo, 0, "VIT_CE")
     add_user(audit_repo, 1, "VIT_IT")
     control = company(id="SYNTHETIC-CONTROL", company="Fictional Control")
@@ -577,7 +582,7 @@ async def test_full_no_reset_natural_cycle_characterization(audit_repo, monkeypa
         ("G_PROGRAMS", {"tpoprogram": CE + ", " + IT}),
         ("H_ORGANIZATION", {"organization": "VU"}),
         ("I_LATER_UPDATE", {"regEnddate": "16-Oct-2026"}),
-        ("J_REPLAY", {}),
+        ("J_REPLAY", replay_changes),
         ("K_DISAPPEAR", {}),
         ("L_EMPTY", {}),
     ]
@@ -585,7 +590,9 @@ async def test_full_no_reset_natural_cycle_characterization(audit_repo, monkeypa
     for name, changes in steps:
         current = current.model_copy(update=changes)
         feed = [] if name == "L_EMPTY" else [control] if name == "K_DISAPPEAR" else [control, current]
-        result = detector.process_fetched_companies(feed)
+        # F02: only the disappearance step carries fictional completeness
+        # authority; every other observation reconciles nothing absent.
+        result = detector.process_fetched_companies(feed, observation_complete=(name == "K_DISAPPEAR"))
         inserted = 0
         for new in result.new_companies:
             inserted += fanout.dispatch_opportunity(new, "NEW")
@@ -614,19 +621,22 @@ async def test_full_no_reset_natural_cycle_characterization(audit_repo, monkeypa
             render_facts=notifier.facts[prior_facts:],
             stats=audit_repo.deliveries.get_delivery_stats(),
         ))
-    # Hand-derived CURRENT behavior, separate from desired failing contracts.
+    # Approved policy: real deadline changes are meaningful UPDATEs. Closure,
+    # reopening and programme changes retain their existing distinct-update
+    # contracts; unchanged or equivalent deadline observations are not events.
     assert [(row["new"], row["updates"], row["enqueued"], row["sent"]) for row in snapshots] == [
-        (1, 0, 1, 1), (0, 0, 0, 0), (0, 0, 0, 0), (0, 1, 1, 1),
-        (0, 1, 0, 0), (0, 1, 0, 0), (0, 1, 1, 1), (0, 0, 0, 0),
+        (1, 0, 1, 1), (0, 1, 1, 1), (0, 1, 1, 1), (0, 1, 1, 1),
+        (0, 1, 1, 1), (0, 1, 1, 1), (0, 1, 2, 2), (0, 1, 0, 0),
         (0, 1, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0),
     ]
-    assert [row["admin_pending_before"] for row in snapshots] == [1, 0, 0, 1, 1, 1, 1, 0, 1, 0, 0, 0]
+    assert [row["admin_pending_before"] for row in snapshots] == [1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0]
     assert snapshots[-1]["stats"]["SENT"] == 3
     assert snapshots[-1]["types"] == ["NEW", "UPDATE", "UPDATE"]
     assert snapshots[4]["raw"]["active"] == "False"
     assert snapshots[5]["raw"]["active"] == "True"
     assert snapshots[7]["raw"]["organization"] == "VU"
-    # I's zero fanout is organization exclusion; E/F isolate lifetime UPDATE dedupe.
+    # H/I's zero fanout is institution exclusion; E/F remain distinct updates.
+    # G reaches both eligible subscribers; replay J reaches neither.
     assert snapshots[10]["deactivated"] == [SYNTHETIC_ID]
     assert snapshots[10]["normalized"]["active"] == "False"
     assert snapshots[10]["raw"]["active"] == "True"

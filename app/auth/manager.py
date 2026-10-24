@@ -48,7 +48,8 @@ class AuthManager:
             try:
                 self.context = await self.browser.new_context(storage_state=self.state_file)
             except Exception as e:
-                logger.warning(f"Failed to load storage state: {e}. Starting fresh context.")
+                logger.warning("Stored session state could not be loaded (%s); starting fresh context.",
+                            type(e).__name__)
                 self.context = await self.browser.new_context()
         else:
             logger.info("No existing session state found. Starting fresh context...")
@@ -126,7 +127,7 @@ class AuthManager:
                 return True
             return False
         except Exception as e:
-            logger.warning(f"Error checking authentication status: {e}")
+            logger.warning("Authentication status check failed (%s).", type(e).__name__)
             return False
 
     async def login(self):
@@ -158,14 +159,14 @@ class AuthManager:
             
             logger.info("Waiting for authentication completion...")
             await page.wait_for_url(lambda u: "home" in u or "dashboard" in u, timeout=45000)
-            logger.info(f"Authentication successful! Landed at {page.url}")
+            logger.info("Authentication successful; authenticated view reached.")
             
             # Save storage state
             await self.context.storage_state(path=self.state_file)
             logger.info(f"Session state saved to storage at {self.state_file}.")
             
         except Exception as e:
-            logger.error(f"Login failed: {e}")
+            logger.error("Login failed (%s).", type(e).__name__)
             if os.path.exists(self.state_file):
                 try:
                     os.remove(self.state_file)

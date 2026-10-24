@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 from app.tpo.models import CompanyRecord
 from app.database.repository import DatabaseRepository
+from app.tpo.listing import SourceEvidenceError
 from app.tpo.normalization import registration_values, normalize_organizations, tokenize_programmes
 from app.subscribers.canonical import extract_eligible_canonical_branches
 
@@ -19,43 +20,94 @@ class CompanyDetector:
     def __init__(self, db: DatabaseRepository):
         self.db = db
 
-    def process_fetched_companies(self, companies: List[CompanyRecord]) -> DetectionResult:
+    @staticmethod
+    def _validated_unique_records(companies: List[CompanyRecord]) -> List[CompanyRecord]:
+        """F09: whole-observation identity/name checks before any business write.
+
+        Identical duplicate records collapse to their first occurrence; a
+        conflicting duplicate identity, a blank/whitespace name or an unstable
+        identity rejects the entire observation (mirroring the stricter listing
+        adapter's contract: no writes happen on a rejected observation)."""
+        unique: Dict[str, tuple] = {}
+        ordered: List[CompanyRecord] = []
+        for record in companies:
+            identity = str(record.id)
+            if (not identity.strip() or identity.strip().casefold() in ("null", "none")
+                    or identity != identity.strip() or len(identity) > 256):
+                raise SourceEvidenceError("stable source identity required")
+            if not str(record.company or "").strip():
+                raise SourceEvidenceError("company name required")
+            encoded = json.dumps(record.model_dump(), sort_keys=True, separators=(",", ":"))
+            if identity in unique:
+                if unique[identity] != encoded:
+                    raise SourceEvidenceError("conflicting duplicate source identity")
+                continue
+            unique[identity] = encoded
+            ordered.append(record)
+        return ordered
+
+    def _apply(self, company: CompanyRecord, *, is_new: bool,
+               notification_type: Optional[str] = None, changes: Optional[List[str]] = None):
+        """F05: prefer the atomic company-transition+obligation unit. Duck-typed
+        repositories without apply_company_event keep the legacy calls."""
+        apply_event = getattr(self.db, "apply_company_event", None)
+        if callable(apply_event):
+            apply_event(company, is_new=is_new, notification_type=notification_type,
+                        changes=changes, event_snapshot=company.model_dump_json())
+            return
+        self.db.upsert_company(company, is_new=is_new)
+        if notification_type is not None and hasattr(self.db, "add_pending_notification"):
+            self.db.add_pending_notification(company.id, notification_type, changes or [])
+
+    def process_fetched_companies(self, companies: List[CompanyRecord],
+                                  *, observation_complete: bool = False) -> DetectionResult:
+        companies = self._validated_unique_records(list(companies))
         is_baseline = not self.db.is_baseline_initialized()
         result = DetectionResult()
-        
+
         if is_baseline:
             logger.info(f"Initializing baseline with {len(companies)} companies. No notifications will be sent.")
-            
+
         for company in companies:
             existing = self.db.get_company(company.id)
-            
+
             if not existing:
-                # New company
-                self.db.upsert_company(company, is_new=True)
-                if not is_baseline:
+                # New company. Baseline ingest records the company without any
+                # notification obligation; a detected new company records both
+                # atomically.
+                if is_baseline:
+                    self._apply(company, is_new=True)
+                else:
+                    self._apply(company, is_new=True, notification_type="NEW", changes=[])
                     result.new_companies.append(company)
-                    if hasattr(self.db, "add_pending_notification"):
-                        self.db.add_pending_notification(company.id, "NEW", [])
             else:
-                # Existing company.
-                # Update last_seen_at implicitly.
+                # Existing company. Update last_seen_at implicitly.
                 if not is_baseline:
                     changes = self._get_meaningful_changes(existing, company)
                     if changes:
+                        # F05: the stored update and its durable UPDATE obligation
+                        # commit together, with the event-time snapshot (F07).
+                        self._apply(company, is_new=False, notification_type="UPDATE", changes=changes)
                         result.updated_companies.append((company, changes))
-                        if hasattr(self.db, "add_pending_notification"):
-                            self.db.add_pending_notification(company.id, "UPDATE", changes)
-                
-                # We always upsert to keep raw_data_json and last_seen_at fresh.
-                self.db.upsert_company(company)
-                    
-        # Authoritative Feed Reconciliation
-        # Only reconcile if companies feed is non-empty (safety guardrail against anomalous empty fetches)
-        if companies:
+                    else:
+                        self._apply(company, is_new=False)
+                else:
+                    self._apply(company, is_new=False)
+
+        # Authoritative Feed Reconciliation — F02: absence evidence requires an
+        # explicitly complete observation. A non-empty but possibly partial feed
+        # must never fabricate absence; positive updates above are unaffected.
+        # Default V1 has no completeness authority, so it fails closed.
+        if companies and observation_complete is True:
             if hasattr(self.db, "deactivate_missing_companies"):
                 incoming_ids = {str(c.id) for c in companies}
                 deactivated = self.db.deactivate_missing_companies(incoming_ids)
                 result.deactivated_companies = deactivated
+        elif companies:
+            logger.info(
+                "Observation carries no completeness authority; preserving stored "
+                "companies absent from this feed (feed size %d).", len(companies)
+            )
         else:
             logger.warning(
                 "process_fetched_companies received empty companies list. "
@@ -64,7 +116,7 @@ class CompanyDetector:
 
         if is_baseline:
             self.db.set_baseline_initialized()
-            
+
         return result
 
     def _get_meaningful_changes(self, existing: dict, new_record: CompanyRecord) -> List[str]:

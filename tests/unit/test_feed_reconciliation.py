@@ -47,8 +47,13 @@ def test_reconciliation_test_a_deactivate_missing_active_company(repo, detector)
     assert repo.get_company("2")["is_active"] == "True"
     assert repo.get_company("3")["is_active"] == "True"
 
-    # Next cycle: only A and B in feed (C has disappeared)
+    # Next cycle: only A and B in feed (C has disappeared). F02: without
+    # completeness authority the partial feed must preserve C…
     result = detector.process_fetched_companies([comp_a, comp_b])
+    assert result.deactivated_companies == []
+    assert repo.get_company("3")["is_active"] == "True"
+    # …an explicitly complete census observation reconciles absence as before.
+    result = detector.process_fetched_companies([comp_a, comp_b], observation_complete=True)
 
     assert "3" in result.deactivated_companies
     assert repo.get_company("1")["is_active"] == "True"

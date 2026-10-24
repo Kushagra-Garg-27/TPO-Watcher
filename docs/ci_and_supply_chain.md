@@ -22,7 +22,7 @@ The CI pipeline consists of four distinct, decoupled jobs executing on standard 
 - **Environment:** Python 3.12 with pip dependency caching.
 - **Dependencies:** Installed from requirements manifest via `pip install -r requirements.txt`. Note: Because top-level Python dependencies are unpinned in the current baseline, version resolution is dynamic; full deterministic reproducibility requires a pinned lockfile (planned for an owner-approved follow-up).
 - **Command:** `pytest -v`.
-- **Quality Gate:** All 197 unit and integration tests must pass with 0 failures.
+- **Quality Gate:** the complete unit and integration suite must pass with 0 failures; the exact test count is tracked per release receipt rather than fixed in this document.
 - **Safety Boundary:** All test paths use hermetic synthetic database fixtures and mock transports (`guard_live_smtp`, `guard_live_database`). No live external connections (SMTP, VIERP, AWS, or production databases) are permitted or initiated.
 
 ### B. Frontend Lint & Build (`frontend-checks`)
@@ -83,7 +83,7 @@ Developers can reproduce all CI checks on a local machine prior to committing:
 ```bash
 # 1. Run Python Backend Tests
 .\.venv\Scripts\pytest.exe -v
-# (Expect 197 passing tests)
+# (Expect the full suite; see the release receipt for the exact count)
 
 # 2. Run Frontend Linter
 cd frontend

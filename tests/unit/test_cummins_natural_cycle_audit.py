@@ -370,7 +370,7 @@ def test_f10_disappearance_is_not_explicit_closure_and_empty_feed_preserves(audi
     control = make_company(id="SYNTHETIC-CONTROL", company="Fictional Control")
     detector = CompanyDetector(audit_repo)
     detector.process_fetched_companies([main, control])
-    absent = detector.process_fetched_companies([control])
+    absent = detector.process_fetched_companies([control], observation_complete=True)
     assert absent.deactivated_companies == [SYNTHETIC_ID]
     assert not absent.updated_companies
     stored = audit_repo.get_company(SYNTHETIC_ID)

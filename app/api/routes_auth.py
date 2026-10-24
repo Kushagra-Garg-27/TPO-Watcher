@@ -91,8 +91,11 @@ def signup(
         send(payload.email, raw_token)
     except Exception:
         logger.warning("Account-link request could not complete transport processing.")
-    legacy = ("Verification link sent! Please check your email and click the link to activate notifications or manage preferences."
-        if verified else "Verification link sent! Please check your email and click the link within 24 hours to activate notifications.")
+    # F19: one neutral message for every account state. It neither reveals
+    # whether the account exists/verified nor claims provider acceptance or
+    # inbox delivery — only that a link request was received and attempted.
+    legacy = ("Request received. If eligible, an account link will be attempted. "
+              "Please check your inbox.")
     return account_request_response(repos, legacy)
 
 @router.post("/auth/verify/confirm")

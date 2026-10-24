@@ -16,7 +16,7 @@ const PIPELINE_STEPS = [
     icon: <Sparkles className="h-5 w-5 text-accent" />,
     title: 'CHANGE DETECTION',
     desc: 'Every observed company schedule is reconciled against known database state. New recruiters, registration dates, or package changes are immediately flagged.',
-    meta: 'ZERO FALSE DUPLICATES · PERSISTENT STATE',
+    meta: 'DEDUPLICATED EVENTS · PERSISTENT STATE',
   },
   {
     step: '03',
@@ -32,7 +32,7 @@ const PIPELINE_STEPS = [
     icon: <MailCheck className="h-5 w-5 text-accent" />,
     title: 'ACTIONABLE INBOX ALERT',
     desc: 'A verified notification is dispatched to your email with recruiter name, package CTC, deadline, and eligibility criteria—giving you the earliest window to act.',
-    meta: 'ZERO DELAY · DIRECT TO YOUR INBOX',
+    meta: 'SCHEDULED DISPATCH · DIRECT TO YOUR INBOX',
   },
 ]
 
@@ -51,10 +51,10 @@ export function MonitoringPipeline() {
             <h2 className="font-display text-4xl sm:text-6xl md:text-7xl uppercase text-foreground leading-[0.9] tracking-tight">
               A SYSTEM IS WATCHING.
               <br />
-              <span className="text-muted">YOU KNOW IMMEDIATELY.</span>
+              <span className="text-muted">YOU KNOW WHEN IT CHANGES.</span>
             </h2>
             <p className="mt-5 text-sm sm:text-base text-muted font-light leading-relaxed max-w-xl font-sans">
-              Instead of manually checking VIERP dozens of times every week, TPO-Watcher continuously monitors the source, processes eligibility diffs, and alerts you before registration closes.
+              Instead of manually checking VIERP dozens of times every week, TPO-Watcher checks the source on its fixed daily schedule, processes eligibility diffs, and alerts you ahead of registration deadlines when the schedule allows.
             </p>
           </FadeUp>
         </div>
