@@ -86,7 +86,7 @@ export function SignupPage({ navigate }: SignupPageProps) {
 
     if (result.ok) {
       setFormState('success')
-      setSuccessMsg(result.data?.message || 'Verification link sent! Check your inbox.')
+      setSuccessMsg(result.data?.message || 'Request received. If eligible, an account link will be attempted — check your inbox.')
     } else {
       setFormState('error')
       setApiError(result.error || 'Something went wrong. Please try again.')
@@ -253,9 +253,9 @@ export function SignupPage({ navigate }: SignupPageProps) {
                       <div className="mt-6 p-4 bg-surface-2 rounded-lg border border-line text-xs font-mono text-muted text-left">
                         <div className="flex items-center gap-2 text-foreground font-semibold mb-1">
                           <Mail className="h-3.5 w-3.5 text-accent" />
-                          <span>VERIFICATION LINK DISPATCHED</span>
+                          <span>VERIFICATION LINK REQUESTED</span>
                         </div>
-                        Click the single-use link in your inbox within 24 hours to activate notifications. Once verified, your alerts begin immediately.
+                        If this address is eligible, a single-use link is sent to your inbox within 24 hours to activate notifications. Delivery cannot be confirmed from here — check your spam folder if it does not arrive.
                       </div>
                       <button
                         type="button"

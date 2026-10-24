@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Calendar, Award, Sparkles, AlertCircle, Building2, Clock, History } from 'lucide-react'
 import { api, type VerifiedOpportunity, type LegacyOpportunity } from '../../lib/api'
+import { parseDeadline } from '../../lib/deadline'
+
 
 function formatPackage(pkg: string | null | undefined, unit: string | null): string | null {
   if (!pkg) return null
@@ -28,47 +30,6 @@ function parsePrograms(programsStr: string | null | undefined): string[] {
       }
     })
   return Array.from(unique)
-}
-
-interface DeadlineInfo {
-  text: string
-  isPassed: boolean
-}
-
-function parseDeadline(deadlineStr: string | null | undefined, currentMs: number = Date.now()): DeadlineInfo {
-  if (!deadlineStr || !deadlineStr.trim() || deadlineStr.toLowerCase() === 'null') {
-    return { text: 'Not reported in source', isPassed: false }
-  }
-  const trimmed = deadlineStr.trim()
-  const parts = trimmed.split(/[-/ ]/)
-  let deadlineDate: Date | null = null
-
-  if (parts.length === 3) {
-    const day = parseInt(parts[0], 10)
-    const monthStr = parts[1].toLowerCase().slice(0, 3)
-    const year = parseInt(parts[2], 10)
-    const monthNames: Record<string, number> = {
-      jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
-      jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
-    }
-    if (monthNames[monthStr] !== undefined && !isNaN(day) && !isNaN(year)) {
-      // 23:59:59 on deadline day
-      deadlineDate = new Date(year, monthNames[monthStr], day, 23, 59, 59)
-    }
-  }
-
-  if (!deadlineDate) {
-    const parsed = Date.parse(trimmed)
-    if (!isNaN(parsed)) {
-      deadlineDate = new Date(parsed)
-    }
-  }
-
-  if (deadlineDate && deadlineDate.getTime() < currentMs) {
-    return { text: `${trimmed} (Passed)`, isPassed: true }
-  }
-
-  return { text: trimmed, isPassed: false }
 }
 
 export function LiveOpportunities() {

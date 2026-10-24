@@ -86,7 +86,7 @@ def test_signup_validation(test_client):
         "pref_ppo": True
     })
     assert res.status_code == 201
-    assert "Verification link sent" in res.json()["message"]
+    assert "Request received" in res.json()["message"]
 
     # Verify fake email sink captured verification email without touching SMTP
     assert len(test_client.fake_email.sent_emails) == 1
