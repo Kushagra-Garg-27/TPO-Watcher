@@ -13,6 +13,24 @@ from app.backup.snapshot import create_snapshot, prune_local_backups, BACKUP_FIL
 from scripts.backup_sqlite import execute_host_backup
 from scripts.restore_test import validate_snapshot
 
+
+def _list_result_for(args, size=None):
+    """Echo the exact requested key back from a mocked list-objects-v2 call."""
+    key = args[args.index("--prefix") + 1]
+    contents = [] if size is None else [{"Key": key, "Size": size}]
+    return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"Contents": contents}), stderr="")
+
+
+def _list_first_empty_then(size):
+    """Pre-check sees no existing key; final verification echoes the key."""
+    state = {"calls": 0}
+
+    def handler(args):
+        state["calls"] += 1
+        return _list_result_for(args, None if state["calls"] == 1 else size)
+
+    return handler
+
 @pytest.fixture
 def sample_db(tmp_path):
     from datetime import datetime, timezone, timedelta
@@ -82,6 +100,8 @@ def test_upload_failure(tmp_path):
             dest = args[3]
             Path(dest).write_bytes(b"x" * 1024)
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if "aws" in args and "s3api" in args and "list-objects-v2" in args:
+            return _list_result_for(args)
         if "aws" in args and "s3" in args and "cp" in args:
             raise subprocess.CalledProcessError(1, args, stderr="S3 PutObject AccessDenied")
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
@@ -117,6 +137,7 @@ def test_remote_object_missing():
 def test_remote_size_mismatch():
     fake_path = "/app/data/backups/watcher_20261007T120000Z.sqlite"
     snap_meta = {"status": "ok", "path": fake_path, "size": 512, "timestamp": "20261007T120000Z"}
+    list_handler = _list_first_empty_then(256)
 
     def fake_run(args, check=True):
         if "docker" in args and "exec" in args:
@@ -128,9 +149,7 @@ def test_remote_size_mismatch():
         if "aws" in args and "s3" in args and "cp" in args:
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
         if "aws" in args and "s3api" in args and "list-objects-v2" in args:
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({
-                "Contents": [{"Key": "backups/watcher_20261007T120000Z.sqlite", "Size": 256}]
-            }), stderr="")
+            return list_handler(args)
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     with patch("scripts.backup_sqlite.run_cmd", side_effect=fake_run):
@@ -142,6 +161,7 @@ def test_temp_cleanup_on_success():
     fake_path = "/app/data/backups/watcher_20261007T120000Z.sqlite"
     snap_meta = {"status": "ok", "path": fake_path, "size": 512, "timestamp": "20261007T120000Z"}
     created_temp_dirs = []
+    list_handler = _list_first_empty_then(512)
 
     orig_mkdtemp = tempfile.mkdtemp
     def tracked_mkdtemp(*args, **kwargs):
@@ -159,15 +179,15 @@ def test_temp_cleanup_on_success():
         if "aws" in args and "s3" in args and "cp" in args:
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
         if "aws" in args and "s3api" in args and "list-objects-v2" in args:
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({
-                "Contents": [{"Key": "backups/watcher_20261007T120000Z.sqlite", "Size": 512}]
-            }), stderr="")
+            return list_handler(args)
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     with patch("tempfile.mkdtemp", side_effect=tracked_mkdtemp), \
          patch("scripts.backup_sqlite.run_cmd", side_effect=fake_run):
         res = execute_host_backup(bucket="my-bucket")
         assert res["status"] == "success"
+        # F17: the remote key carries a unique short-random suffix.
+        assert re.search(r"-[0-9a-f]{8}\.sqlite$", res["key"])
 
     assert len(created_temp_dirs) == 1
     assert not os.path.exists(created_temp_dirs[0])
@@ -177,6 +197,7 @@ def test_temp_cleanup_on_failure():
     fake_path = "/app/data/backups/watcher_20261007T120000Z.sqlite"
     snap_meta = {"status": "ok", "path": fake_path, "size": 512, "timestamp": "20261007T120000Z"}
     created_temp_dirs = []
+    list_handler = _list_first_empty_then(512)
 
     orig_mkdtemp = tempfile.mkdtemp
     def tracked_mkdtemp(*args, **kwargs):
@@ -286,3 +307,32 @@ def test_restore_validation_failure(tmp_path):
     conn.close()
 
     assert validate_snapshot(str(bad_db)) is False
+
+
+# 14. Pre-existing remote key is never overwritten (F17)
+def test_existing_remote_key_refused():
+    fake_path = "/app/data/backups/watcher_20261007T120000Z.sqlite"
+    snap_meta = {"status": "ok", "path": fake_path, "size": 512, "timestamp": "20261007T120000Z"}
+
+    def fake_run(args, check=True):
+        if "docker" in args and "exec" in args:
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(snap_meta), stderr="")
+        if "docker" in args and "cp" in args:
+            Path(args[3]).write_bytes(b"x" * 512)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if "aws" in args and "s3api" in args and "list-objects-v2" in args:
+            # Every list call echoes the key: the pre-check sees an existing
+            # object and the tool must refuse before any upload.
+            return _list_result_for(args, size=512)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    uploaded = []
+    def forbid_upload(args, check=True):
+        if "aws" in args and "cp" in args:
+            uploaded.append(args)
+        return fake_run(args, check=check)
+
+    with patch("scripts.backup_sqlite.run_cmd", side_effect=forbid_upload):
+        with pytest.raises(RuntimeError, match="Refusing to overwrite"):
+            execute_host_backup(bucket="my-bucket")
+    assert uploaded == []

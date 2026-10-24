@@ -124,12 +124,11 @@ def execute_host_backup(
         filename = os.path.basename(container_snapshot_path)
         logger.info("Snapshot created successfully in container: %s (%d bytes)", container_snapshot_path, expected_size)
 
-        # Secure host temporary directory
+        # Secure host temporary directory. A private copy of the subscriber
+        # database must never sit in a group/world-readable location (F17):
+        # failing to lock it down aborts the backup instead of warning.
         temp_dir = tempfile.mkdtemp(prefix="tpo_backup_")
-        try:
-            os.chmod(temp_dir, 0o700)
-        except Exception as e:
-            logger.warning("Could not set 0700 permissions on temp dir: %s", e)
+        os.chmod(temp_dir, 0o700)
 
         host_snapshot_path = os.path.join(temp_dir, filename)
 
@@ -137,6 +136,8 @@ def execute_host_backup(
         logger.info("Copying snapshot from container to host temporary directory...")
         cp_cmd = ["docker", "cp", f"{container}:{container_snapshot_path}", host_snapshot_path]
         run_cmd(cp_cmd, check=True)
+        # The private copy itself is 0600 regardless of container-side modes.
+        os.chmod(host_snapshot_path, 0o600)
 
         if not os.path.exists(host_snapshot_path):
             raise FileNotFoundError(f"Copied snapshot not found on host: {host_snapshot_path}")
@@ -145,9 +146,19 @@ def execute_host_backup(
         if local_size != expected_size:
             raise ValueError(f"Size mismatch after copy: expected {expected_size}, got {local_size}")
 
-        # Upload to S3 via AWS CLI (EC2 instance profile credentials)
-        s3_key = f"{prefix.strip('/')}/{filename}"
+        # Unique, non-overwriting key (F17): a short random suffix prevents a
+        # same-timestamp collision from silently replacing a prior snapshot,
+        # and an exact-key pre-check refuses any existing object.
+        import uuid
+        stem, dot, suffix = filename.rpartition(".")
+        unique_name = f"{stem}-{uuid.uuid4().hex[:8]}{dot + suffix if dot else ''}"
+        s3_key = f"{prefix.strip('/')}/{unique_name}"
         s3_uri = f"s3://{bucket}/{s3_key}"
+        precheck = run_cmd([
+            "aws", "s3api", "list-objects-v2", "--bucket", bucket, "--prefix", s3_key
+        ], check=True)
+        if any(obj.get("Key") == s3_key for obj in json.loads(precheck.stdout).get("Contents", [])):
+            raise RuntimeError(f"Refusing to overwrite existing backup object: {s3_key}")
         logger.info("Uploading snapshot to %s with AES256 server-side encryption...", s3_uri)
 
         upload_cmd = ["aws", "s3", "cp", host_snapshot_path, s3_uri, "--sse", "AES256"]
@@ -190,10 +201,20 @@ def execute_host_backup(
         raise
 
     finally:
-        # Always remove host temporary directory and artifacts
+        # Remove host temporary directory and artifacts. Cleanup failures are
+        # surfaced per-path (F17) instead of being silently ignored; a failed
+        # cleanup leaves a private-mode copy behind but is never silent.
         if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            logger.info("Cleaned up host temporary directory: %s", temp_dir)
+
+            def _on_rm_error(func, target, exc_info):
+                logger.error("Backup cleanup could not remove %s (%s).",
+                             target, type(exc_info[1]).__name__)
+
+            shutil.rmtree(temp_dir, onerror=_on_rm_error)
+            if os.path.exists(temp_dir):
+                logger.error("Host temporary directory remains: %s (mode 0700).", temp_dir)
+            else:
+                logger.info("Cleaned up host temporary directory: %s", temp_dir)
 
 def main():
     parser = argparse.ArgumentParser(description="TPO-Watcher Host SQLite Backup & S3 Upload Tool")

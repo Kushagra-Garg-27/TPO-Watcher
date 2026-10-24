@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
 TPO-Watcher SQLite Restore Validation Tool.
-Validates database snapshots by checking:
+Validates database snapshots by checking, strictly read-only:
 1. PRAGMA integrity_check == 'ok'
 2. Required tables exist
 3. Expected columns exist
 4. Representative SELECT queries execute successfully
-5. Application repository layer can read the restored database
+
+The validator never constructs application repositories against the evidence
+copy: DatabaseRepository construction runs schema initialization/migrations,
+which would silently mutate the snapshot under validation.
 """
 
 import sys
@@ -78,6 +81,9 @@ def validate_snapshot(snapshot_path: str) -> bool:
                         logger.error("Required column '%s' missing from table '%s'.", col, table)
                         return False
 
+            # Hard read-only guarantee for everything below (F17).
+            conn.execute("PRAGMA query_only=ON;")
+
             # 5. Representative SELECTs
             conn.execute("SELECT count(*) FROM users;").fetchone()
             conn.execute("SELECT count(*) FROM companies;").fetchone()
@@ -88,11 +94,8 @@ def validate_snapshot(snapshot_path: str) -> bool:
         finally:
             conn.close()
 
-        # 6. Verify application DatabaseRepository can open and query it
-        from app.database.repository import DatabaseRepository
-        repo = DatabaseRepository(str(path))
-        _ = repo.is_baseline_initialized()
-        _ = repo.get_all_company_ids()
+        # 6. Repository-layer compatibility is proven by opening the copy in a
+        # separate authorized drill, never by mutating this evidence file.
 
         logger.info("Snapshot restore validation passed successfully for: %s", path)
         return True
