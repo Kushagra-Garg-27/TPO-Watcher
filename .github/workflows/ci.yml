@@ -4,9 +4,15 @@ name: CI & Software Supply Chain
   push:
     branches:
       - main
+      - 'student-auth/**'
+      - 'codex/vierp-release-*'
+      - 'codex/notification-*'
   pull_request:
     branches:
       - main
+      - 'student-auth/**'
+      - 'codex/vierp-release-*'
+      - 'codex/notification-*'
 
 permissions:
   contents: read

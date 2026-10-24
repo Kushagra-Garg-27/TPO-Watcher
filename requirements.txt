@@ -1,13 +1,16 @@
-playwright
-pydantic
-pydantic-settings
-httpx
-pytest
-pytest-asyncio
-pytest-mock
-tzdata
-fastapi
-uvicorn[standard]
-slowapi
-jinja2
+# Pinned to the exact versions exercised by the local isolated regression
+# suite (F18 reproducibility). Upgrade only through a separately reviewed
+# compatibility change with a fresh full-suite receipt; never mid-release.
+playwright==1.63.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+httpx==0.28.1
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-mock==3.16.0
+tzdata==2026.4
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+slowapi==0.1.10
+jinja2==3.1.6
 cryptography==50.0.2
