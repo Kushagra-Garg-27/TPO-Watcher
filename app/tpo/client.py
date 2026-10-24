@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 API_ENDPOINT = "https://tpoapi.vierp.in/TPOCompanyScheduling/newschedulesdcopanies"
 
 _UNDECODED = object()
+# No rejection/authentication status tokens have independent source evidence.
+_DOCUMENTED_REJECTION_MARKERS = frozenset()
 
 
 def _json_type(value):
@@ -18,6 +20,25 @@ def _json_type(value):
         return "unavailable"
     return {dict: "object", list: "array", str: "string", bool: "boolean",
             int: "integer", float: "number", type(None): "null"}.get(type(value), "other")
+
+
+def _status_diagnostic_category(value):
+    """Observe only reviewed whole tokens; never return source values."""
+    if type(value) is not str:
+        return _json_type(value)
+    if value in ("success", "Success"):
+        return "accepted_success_string"
+    if value == "":
+        return "empty_string"
+    stripped = value.strip()
+    if stripped in ("success", "Success"):
+        return "success_whitespace_variant"
+    if stripped.lower() == "success":
+        return ("success_case_and_whitespace_variant" if stripped != value
+                else "success_case_variant")
+    if value in _DOCUMENTED_REJECTION_MARKERS:
+        return "documented_rejection_marker"
+    return "other_string"
 
 
 def _log_rejected_response(response, category, body=_UNDECODED):
@@ -30,9 +51,11 @@ def _log_rejected_response(response, category, body=_UNDECODED):
     items = body.get("company_list", _UNDECODED) if isinstance(body, dict) else _UNDECODED
     logger.warning(
         "Rejected TPO response: category=%s http_status=%s content_type=%s "
-        "json_type=%s fields=%s company_list_length=%s",
+        "json_type=%s fields=%s company_list_length=%s status_category=%s",
         category, response.status, content_type, _json_type(body), fields,
-        len(items) if isinstance(items, list) else "unavailable")
+        len(items) if isinstance(items, list) else "unavailable",
+        _status_diagnostic_category(body.get("status", _UNDECODED)
+                                    if isinstance(body, dict) else _UNDECODED))
 
 
 def _source_rejection_category(body):

@@ -12,6 +12,122 @@ from app.tpo.client import API_ENDPOINT, AuthenticationError, TPOClient
 from app.tpo.listing import SourceEvidenceError
 
 
+@pytest.mark.parametrize("status,category,accepted", [
+    pytest.param("success", "accepted_success_string", True, id="exact-lowercase"),
+    pytest.param("Success", "accepted_success_string", True, id="exact-titlecase"),
+    pytest.param("SUCCESS", "success_case_variant", False, id="uppercase"),
+    pytest.param("sUcCeSs", "success_case_variant", False, id="mixed-case"),
+    pytest.param(" success", "success_whitespace_variant", False, id="leading-space"),
+    pytest.param("success ", "success_whitespace_variant", False, id="trailing-space"),
+    pytest.param("\tSuccess\n", "success_whitespace_variant", False, id="surrounding-whitespace"),
+    pytest.param(" SUCCESS ", "success_case_and_whitespace_variant", False, id="case-and-spaces"),
+    pytest.param("\tsUcCeSs\n", "success_case_and_whitespace_variant", False, id="case-and-controls"),
+    pytest.param("", "empty_string", False, id="empty"),
+    pytest.param(" \t\n", "other_string", False, id="nonempty-whitespace-only"),
+    pytest.param("unknown", "other_string", False, id="unknown"),
+    pytest.param("unsuccessful", "other_string", False, id="no-substring-matching"),
+    pytest.param("success-extra", "other_string", False, id="no-prefix-matching"),
+    pytest.param("ok", "other_string", False, id="no-invented-success-marker"),
+    pytest.param("unauthorized", "other_string", False, id="unsupported-auth-marker"),
+    pytest.param("session_expired", "other_string", False, id="unsupported-session-marker"),
+    pytest.param("error", "other_string", False, id="unsupported-error-marker"),
+    pytest.param("failed", "other_string", False, id="unsupported-failure-marker"),
+    pytest.param("\u017fucce\u017f\u017f", "other_string", False, id="unicode-lookalike-is-not-token"),
+    pytest.param(None, "null", True, id="null"),
+    pytest.param(True, "boolean", True, id="true"),
+    pytest.param(False, "boolean", False, id="false"),
+    pytest.param(200, "integer", True, id="accepted-integer"),
+    pytest.param(1, "integer", True, id="existing-boolean-equality"),
+    pytest.param(200.0, "number", True, id="existing-numeric-equality"),
+    pytest.param(0, "integer", False, id="rejected-integer"),
+    pytest.param([], "array", False, id="array"),
+    pytest.param({}, "object", False, id="object"),
+])
+def test_fixed_status_categories_preserve_source_guard(status, category, accepted):
+    from app.tpo import client as module
+    from app.tpo.listing import validate_listing_body
+    body = {"status": status, "company_list": []}
+    assert module._status_diagnostic_category(status) == category
+    if accepted:
+        validate_listing_body(body)
+    else:
+        with pytest.raises(SourceEvidenceError, match="explicit successful company_list required"):
+            validate_listing_body(body)
+    # Observing a normalized category must never normalize the source itself.
+    assert body["status"] is status
+
+
+def test_missing_and_unexpected_statuses_never_use_repr(capsys):
+    from app.tpo import client as module
+
+    class UnrenderableStatus:
+        def __repr__(self):
+            raise AssertionError("Unexpected status must not be rendered")
+
+        __str__ = __repr__
+
+    assert module._status_diagnostic_category(module._UNDECODED) == "unavailable"
+    assert module._status_diagnostic_category(UnrenderableStatus()) == "other"
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("status,category", [
+    pytest.param("SUCCESS", "success_case_variant", id="case"),
+    pytest.param(" success ", "success_whitespace_variant", id="whitespace"),
+    pytest.param(" SuCcEsS ", "success_case_and_whitespace_variant", id="case-and-whitespace"),
+    pytest.param("unauthorized", "other_string", id="unsupported-rejection-marker"),
+    pytest.param("", "empty_string", id="empty"),
+])
+async def test_rejected_status_with_eight_items_logs_only_fixed_category(status, category, caplog):
+    client, response = browser_client({"status": status, "company_list": [
+        {"id": str(i), "company": "Fictional Employer"} for i in range(8)]})
+    with caplog.at_level(logging.WARNING), pytest.raises(SourceEvidenceError):
+        await client.fetch_companies()
+    assert f"status_category={category}" in caplog.text
+    assert "category=invalid_status" in caplog.text
+    assert "company_list_length=8" in caplog.text
+    assert client._listing_body is None
+    response.text.assert_awaited_once_with()
+
+
+async def test_status_category_is_observational_not_an_acceptance_adapter(monkeypatch, caplog):
+    from app.tpo import client as module
+    monkeypatch.setattr(module, "_status_diagnostic_category", lambda value: "accepted_success_string")
+    client, _ = browser_client({"status": "SUCCESS", "company_list": []})
+    with caplog.at_level(logging.WARNING), pytest.raises(SourceEvidenceError):
+        await client.fetch_companies()
+    assert "category=invalid_status" in caplog.text
+    assert client._listing_body is None
+
+
+async def test_valid_response_does_not_invoke_status_diagnostics(monkeypatch, caplog):
+    from app.tpo import client as module
+    classifier = MagicMock(side_effect=AssertionError("Valid responses must not invoke diagnostics"))
+    monkeypatch.setattr(module, "_status_diagnostic_category", classifier)
+    client, _ = browser_client({"status": "success", "company_list": []})
+    assert await client.fetch_companies() == []
+    classifier.assert_not_called()
+    assert "Rejected TPO response" not in caplog.text
+
+
+async def test_private_unknown_status_never_escapes_diagnostics(caplog, capsys):
+    from app.tpo import client as module
+    private_status = ("PRIVATE_STATUS student=FictionalStudent email=fictional@example.invalid "
+                      "token=PRIVATE_ACCESS_TOKEN https://fictional.invalid/?secret=PRIVATE_QUERY")
+    client, _ = browser_client({"status": private_status, "company_list": [
+        {"id": "fictional", "company": "Fictional Employer"}]})
+    with caplog.at_level(logging.WARNING), pytest.raises(SourceEvidenceError) as exc:
+        await client.fetch_companies()
+    category = module._status_diagnostic_category(private_status)
+    captured = capsys.readouterr()
+    diagnostic_text = category + caplog.text + str(exc.value) + captured.out + captured.err
+    if any(sentinel in diagnostic_text for sentinel in (
+            "PRIVATE", "FictionalStudent", "fictional@example.invalid", "fictional.invalid")):
+        pytest.fail("Private fictional input escaped fixed diagnostics", pytrace=False)
+    assert category == "other_string"
+    assert "status_category=other_string" in caplog.text
+
+
 def browser_client(body=None, *, text=None, status=200, content_type="application/json"):
     response = SimpleNamespace(url=API_ENDPOINT + "?token=PRIVATE_QUERY", status=status,
         ok=200 <= status < 300, headers={"content-type": content_type},
@@ -169,8 +285,16 @@ async def test_scheduler_logs_actual_outcome_without_extra_effects(success, capl
 
 @pytest.mark.parametrize("body", [{}, {"status": "failure", "company_list": []},
     {"company_list": [{"id": "one", "company": "Fictional"}, {"id": None, "company": "Invalid"}]},
-    {"company_list": [{"id": "one", "company": "Fictional"}, {"id": "two", "company": {}}]}])
-async def test_real_client_rejection_stops_all_business_writes(body, tmp_path, monkeypatch):
+    {"company_list": [{"id": "one", "company": "Fictional"}, {"id": "two", "company": {}}]},
+    pytest.param({"status": "SUCCESS", "company_list": [
+        {"id": str(i), "company": "Fictional"} for i in range(8)]}, id="uppercase-eight-items"),
+    pytest.param({"status": " success ", "company_list": [
+        {"id": str(i), "company": "Fictional"} for i in range(8)]}, id="whitespace-eight-items"),
+    pytest.param({"status": " SuCcEsS ", "company_list": [
+        {"id": str(i), "company": "Fictional"} for i in range(8)]}, id="mixed-eight-items"),
+    pytest.param({"status": "PRIVATE_STATUS fictional@example.invalid token=PRIVATE_TOKEN student=PRIVATE_STUDENT",
+                  "company_list": [{"id": "one", "company": "Fictional"}]}, id="private-unknown-status")])
+async def test_real_client_rejection_stops_all_business_writes(body, tmp_path, monkeypatch, caplog, capsys):
     import sqlite3
     from app.database.repository import DatabaseRepository
     from app.monitoring.watcher import PlacementWatcher
@@ -195,6 +319,8 @@ async def test_real_client_rejection_stops_all_business_writes(body, tmp_path, m
     watcher._process_notifications = AsyncMock()
     watcher.delivery_worker = SimpleNamespace(process_batch_once=AsyncMock())
     watcher.fanout = MagicMock()
+    reconcile = MagicMock(wraps=watcher.detector.process_fetched_companies)
+    watcher.detector.process_fetched_companies = reconcile
     monkeypatch.setattr("app.monitoring.watcher.TPOClient", lambda *args: client)
     ping = MagicMock()
     monkeypatch.setattr("app.monitoring.watcher.send_healthcheck_ping", ping)
@@ -202,8 +328,15 @@ async def test_real_client_rejection_stops_all_business_writes(body, tmp_path, m
     assert business_snapshot() == before
     assert repo.get_system_state("last_successful_watcher_run") == "prior-success"
     assert repo.get_system_state("consecutive_watcher_failures") == "3"
+    reconcile.assert_not_called()
     watcher._process_notifications.assert_not_awaited()
     watcher.delivery_worker.process_batch_once.assert_not_awaited()
     watcher.fanout.dispatch_opportunity.assert_not_called()
     ping.assert_called_once()
     assert ping.call_args.kwargs == {"success": False}
+    with sqlite3.connect(repo.db_path) as conn:
+        stored = "\n".join(conn.iterdump())
+    captured = capsys.readouterr()
+    if any(sentinel in stored + caplog.text + captured.out + captured.err
+           for sentinel in ("PRIVATE_STATUS", "PRIVATE_TOKEN", "PRIVATE_STUDENT")):
+        pytest.fail("Private fictional status escaped into output or stored state", pytrace=False)
