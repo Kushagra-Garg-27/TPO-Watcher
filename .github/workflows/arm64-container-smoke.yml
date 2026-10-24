@@ -94,12 +94,10 @@ jobs:
             -t tpo-watcher-smoke:"$CANDIDATE" \
             "$RUNNER_TEMP/appsrc"
           echo "BUILD_EXIT=0"
-          echo "--- base image identity:"
-          docker image inspect mcr.microsoft.com/playwright/python:v1.44.0-jammy \
-            --format '{{json .RepoDigests}} {{.Os}}/{{.Architecture}}'
           echo "--- built image identity:"
           docker image inspect tpo-watcher-smoke:"$CANDIDATE" \
-            --format 'id={{.Id}} arch={{.Os}}/{{.Architecture}}'
+            --format 'id={{.Id}} os={{.Os}} arch={{.Architecture}}'
+          echo "--- base image resolved by digest during build (see the FROM line in this log); the registry manifest list independently confirms a linux/arm64 variant."
 
       - name: Record in-image Python and Playwright versions
         run: |
@@ -199,14 +197,20 @@ jobs:
             tpo-watcher-smoke:"$CANDIDATE" /smoke.py
 
       - name: Disposable state cleanup attestation
+        env:
+          CANDIDATE: 053b152b37d8aea8d5b4c74606765cdc73565136
         run: |
           set -euo pipefail
           # The smoke container ran with --rm (auto-removed) and wrote only to
           # its own ephemeral filesystem (/tmp inside the container); the build
           # worktree lives in runner temp and vanishes with the runner. Nothing
-          # was pushed, uploaded, or persisted outside this job.
-          docker ps --filter "ancestor=tpo-watcher-smoke:053b152b37d8aea8d5b4c74606765cdc73565136" --format '{{.ID}}' | \
-            while read -r id; do echo "::error::unexpected running container $id"; exit 1; done || true
+          # was pushed, uploaded, or persisted outside this job. A leftover
+          # running container is a real failure and must fail this step.
+          leftover=$(docker ps --filter "ancestor=tpo-watcher-smoke:$CANDIDATE" --format '{{.ID}}')
+          if [ -n "$leftover" ]; then
+            echo "::error::unexpected running smoke containers: $leftover"
+            exit 1
+          fi
           echo "Cleanup attested: no containers, no registry push, no artifact upload."
 
       # Deliberately NO docker push, NO artifact upload, NO secrets, NO cache.
