@@ -191,7 +191,9 @@ class PlacementWatcher:
                 if delivered_subs > 0:
                     logger.info(f"Dispatched {delivered_subs} student subscriber notifications.")
                 
-                if not notifications_complete:
+                # Legacy overrides return None after completing normally;
+                # the recoverable drain reports an explicit False on failure.
+                if notifications_complete is False:
                     self.record_heartbeat_failure()
                     send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
                     return False
