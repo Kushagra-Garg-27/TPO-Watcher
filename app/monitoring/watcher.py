@@ -74,115 +74,70 @@ class PlacementWatcher:
                 return True
         return False
 
+    @staticmethod
+    def _notification_record(company_dict):
+        """Keep source fields intact, with the established legacy-column fallback."""
+        try:
+            raw = json.loads(company_dict.get("raw_data_json") or "null")
+            if not isinstance(raw, dict):
+                raise ValueError("source object unavailable")
+            return CompanyRecord(**{**raw, "id": company_dict["id"], "company": company_dict["company"]})
+        except (TypeError, ValueError):
+            fields = {
+                "company_code": "company_code", "regStartdate": "registration_start",
+                "regEnddate": "registration_end", "maxPackage": "max_package",
+                "minPackage": "min_package", "placementtype": "placement_type",
+                "academicyear": "academic_year", "companytype": "company_type",
+                "internshiptype": "internship_type", "skill": "skills",
+                "tpoprogram": "eligible_programs", "organization": "organizations", "isactive": "is_active",
+            }
+            return CompanyRecord(id=company_dict["id"], company=company_dict["company"],
+                **{field: company_dict.get(column) for field, column in fields.items()})
+
     async def _process_notifications(self):
         from app.monitoring.runtime_supervisor import current_runtime
         from app.database.event_repository import PolicyDenied
         if current_runtime(self.db.db_path) is not None:
             raise PolicyDenied('guarded runtime excludes legacy administrative drain')
         pending = self.db.get_pending_notifications()
-        if not pending:
-            return
-            
-        logger.info(f"Processing {len(pending)} pending notifications...")
-        
+        complete = True
         for notif in pending:
-            company_dict = self.db.get_company(notif["company_id"])
-            if not company_dict:
-                logger.error(f"Company {notif['company_id']} not found for notification {notif['id']}. Removing.")
-                self.db.remove_pending_notification(notif["id"])
-                continue
-                
-            raw_json = company_dict.get("raw_data_json")
-            if raw_json:
-                try:
-                    raw = json.loads(raw_json)
-                    # F09: Reconstruct from raw_data_json to preserve time-only fields
-                    # (regStarttime, regEndtime) which are NOT stored in flattened columns.
-                    record = CompanyRecord(
-                        id=company_dict["id"],
-                        company=company_dict["company"],
-                        company_code=raw.get("company_code") or company_dict.get("company_code"),
-                        regStartdate=raw.get("regStartdate"),
-                        regStarttime=raw.get("regStarttime"),  # F09: from raw
-                        regEnddate=raw.get("regEnddate"),
-                        regEndtime=raw.get("regEndtime"),      # F09: from raw
-                        maxPackage=raw.get("maxPackage") or company_dict.get("max_package"),
-                        minPackage=raw.get("minPackage") or company_dict.get("min_package"),
-                        placementtype=raw.get("placementtype") or company_dict.get("placement_type"),
-                        academicyear=raw.get("academicyear") or company_dict.get("academic_year"),
-                        companytype=raw.get("companytype") or company_dict.get("company_type"),
-                        internshiptype=raw.get("internshiptype") or company_dict.get("internship_type"),
-                        skill=raw.get("skill") or company_dict.get("skills"),
-                        tpoprogram=raw.get("tpoprogram") or company_dict.get("eligible_programs"),
-                        programnew=raw.get("programnew"),
-                        organization=raw.get("organization") or company_dict.get("organizations"),
-                        isactive=raw.get("isactive") or company_dict.get("is_active"),
-                    )
-                except Exception:
-                    raw = {}
-                    record = CompanyRecord(
-                        id=company_dict["id"],
-                        company=company_dict["company"],
-                        company_code=company_dict.get("company_code"),
-                        regStartdate=company_dict.get("registration_start"),
-                        regEnddate=company_dict.get("registration_end"),
-                        maxPackage=company_dict.get("max_package"),
-                        minPackage=company_dict.get("min_package"),
-                        placementtype=company_dict.get("placement_type"),
-                        academicyear=company_dict.get("academic_year"),
-                        companytype=company_dict.get("company_type"),
-                        internshiptype=company_dict.get("internship_type"),
-                        skill=company_dict.get("skills"),
-                        tpoprogram=company_dict.get("eligible_programs"),
-                        organization=company_dict.get("organizations"),
-                        isactive=company_dict.get("is_active"),
-                    )
-            else:
-                record = CompanyRecord(
-                    id=company_dict["id"],
-                    company=company_dict["company"],
-                    company_code=company_dict.get("company_code"),
-                    regStartdate=company_dict.get("registration_start"),
-                    regEnddate=company_dict.get("registration_end"),
-                    maxPackage=company_dict.get("max_package"),
-                    minPackage=company_dict.get("min_package"),
-                    placementtype=company_dict.get("placement_type"),
-                    academicyear=company_dict.get("academic_year"),
-                    companytype=company_dict.get("company_type"),
-                    internshiptype=company_dict.get("internship_type"),
-                    skill=company_dict.get("skills"),
-                    tpoprogram=company_dict.get("eligible_programs"),
-                    organization=company_dict.get("organizations"),
-                    isactive=company_dict.get("is_active"),
-                )
+            try:
+                company_dict = self.db.get_company(notif["company_id"])
+                if not company_dict:
+                    self.db.remove_pending_notification(notif["id"])
+                    continue
+                record = self._notification_record(company_dict)
+                receipt_key = f"notification:v1:fanout:{notif['id']}"
+                if self.db.get_system_state(receipt_key) != "complete":
+                    # Existing persisted obligations are replayed even when the
+                    # next source poll has no DetectionResult changes. Admin
+                    # acknowledgment cannot delete work before fanout commits.
+                    self.fanout.dispatch_opportunity(record, notif["notification_type"])
+                    self.db.set_system_state(receipt_key, "complete")
 
-            
-            success = False
-            if notif["notification_type"] == "NEW":
-                target_match = self._matches_target(company_dict)
-                # F11: pass event-time (first_seen_at) so admin email clock
-                # reflects when the opportunity was detected, not rendered.
-                # Fall back gracefully for duck-typed notifiers (e.g. test
-                # FakeNotifier) that only accept positional (company, target_match).
-                event_at_iso = company_dict.get("first_seen_at")
-                try:
-                    success = self.notifier.send_new_company_notification(
-                        record, target_match, event_at=event_at_iso
-                    )
-                except TypeError:
-                    success = self.notifier.send_new_company_notification(record, target_match)
-            elif notif["notification_type"] == "UPDATE":
-                changes = json.loads(notif["changes_json"])
-                success = self.notifier.send_update_notification(record, changes)
-
-
-                
-            if success:
-                self.db.mark_notified(record.id)
-                self.db.remove_pending_notification(notif["id"])
-                logger.info(f"Notification successfully delivered for {record.company} (ID: {record.id}). Status: SENT.")
-            else:
-                logger.warning(f"Failed to deliver notification for {record.company} (ID: {record.id}). Remains PENDING.")
+                success = False
+                if notif["notification_type"] == "NEW":
+                    target_match = self._matches_target(company_dict)
+                    event_at_iso = company_dict.get("first_seen_at")
+                    try:
+                        success = self.notifier.send_new_company_notification(record, target_match, event_at=event_at_iso)
+                    except TypeError:
+                        success = self.notifier.send_new_company_notification(record, target_match)
+                elif notif["notification_type"] == "UPDATE":
+                    success = self.notifier.send_update_notification(record, json.loads(notif["changes_json"]))
+                if success:
+                    self.db.mark_notified(record.id)
+                    self.db.remove_pending_notification(notif["id"])
+                    logger.info("Provider accepted admin notification %s; acknowledgment recorded.", notif["id"])
+                else:
+                    logger.warning("Admin notification %s remains pending.", notif["id"])
+            except Exception as exc:
+                # A fanout/admin/ack failure keeps this durable obligation and
+                # permits other admins and the student drain to make progress.
+                complete = False
+                logger.error("Notification %s remains pending (%s).", notif["id"], type(exc).__name__)
+        return complete
 
     async def check_once(self):
         """Performs a single check iteration with automatic re-authentication recovery."""
@@ -219,12 +174,8 @@ class PlacementWatcher:
                 result = self.detector.process_fetched_companies(companies)
                 if result.new_companies:
                     logger.info(f"Newly detected companies ({len(result.new_companies)}): {[f'{c.company} (ID: {c.id})' for c in result.new_companies]}")
-                    for nc in result.new_companies:
-                        self.fanout.dispatch_opportunity(nc, "NEW")
                 if result.updated_companies:
                     logger.info(f"Updated companies ({len(result.updated_companies)}): {[f'{c[0].company} (ID: {c[0].id})' for c in result.updated_companies]}")
-                    for uc, changes in result.updated_companies:
-                        self.fanout.dispatch_opportunity(uc, "UPDATE")
                 if result.deactivated_companies:
                     logger.info(f"Reconciled/deactivated companies absent from feed ({len(result.deactivated_companies)}): {result.deactivated_companies}")
                 if not result.new_companies and not result.updated_companies and not result.deactivated_companies:
@@ -233,13 +184,17 @@ class PlacementWatcher:
                 # 4. Process pending admin notifications (Independent safety channel preserved)
                 pending_count = len(self.db.get_pending_notifications())
                 logger.info(f"Pending admin notifications in queue: {pending_count}")
-                await self._process_notifications()
+                notifications_complete = await self._process_notifications()
 
                 # 5. Process student subscriber deliveries via recoverable lease worker
                 delivered_subs = await self.delivery_worker.process_batch_once()
                 if delivered_subs > 0:
                     logger.info(f"Dispatched {delivered_subs} student subscriber notifications.")
                 
+                if not notifications_complete:
+                    self.record_heartbeat_failure()
+                    send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
+                    return False
                 logger.info("Check iteration complete.")
                 self.record_heartbeat_success()
                 send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=True)

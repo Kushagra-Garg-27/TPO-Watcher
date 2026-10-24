@@ -322,4 +322,7 @@ class DatabaseRepository:
     def remove_pending_notification(self, notif_id: int):
         with self._get_conn() as conn:
             conn.execute("DELETE FROM pending_notifications WHERE id = ?", (notif_id,))
+            # This marker is written only after durable recipient enqueue. Its
+            # lifetime matches the admin obligation, including admin retries.
+            conn.execute("DELETE FROM system_state WHERE key = ?", (f"notification:v1:fanout:{notif_id}",))
             conn.commit()

@@ -20,6 +20,17 @@ def run_migrations(db_path: str) -> None:
         conn.execute("PRAGMA busy_timeout = 5000;")
         conn.execute("PRAGMA foreign_keys = ON;")
 
+        # Shared V1 repositories also need the existing state table for durable
+        # claim ownership. Production already has this identical table; never
+        # rewrite its schema or data when standalone repositories initialize.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS system_state (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP
+            )
+        """)
+
         # 1. Users (subscribers restricted to 2028)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (

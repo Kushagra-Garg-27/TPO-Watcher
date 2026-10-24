@@ -1,5 +1,6 @@
 import sqlite3
 import logging
+import secrets
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 from app.database.migrations import run_migrations
@@ -382,20 +383,52 @@ class SQLiteTokenRepository(SQLiteBaseRepository):
             )
             return deleted_count
 
+class _ClaimedDeliveryId(int):
+    """Local claim authority. Numeric serialization deliberately drops authority.
+
+    The durable token lives in system_state, not a process-local owner map.
+    Its representation stays a numeric ID so logs never expose the token.
+    """
+    def __new__(cls, value, token):
+        instance = int.__new__(cls, value)
+        instance._claim_token = token
+        return instance
+
+
+class DeliveryFanoutDeferred(RuntimeError):
+    """A distinct UPDATE must retain its durable obligation until prior work ends."""
+
+
 class SQLiteDeliveryRepository(SQLiteBaseRepository):
+    _CLAIM_PREFIX = "notification:v1:claim:"
+
+    @classmethod
+    def _claim_key(cls, delivery_id):
+        return cls._CLAIM_PREFIX + str(int(delivery_id))
+
     def enqueue_deliveries(self, deliveries: List[Dict[str, Any]]) -> int:
         if not deliveries:
             return 0
         now = datetime.now(timezone.utc).isoformat()
         inserted = 0
         with self._get_conn() as conn:
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
             for d in deliveries:
                 notif_type = d["notification_type"]
                 existing = conn.execute(
-                    """SELECT id, status FROM notification_deliveries
+                    """SELECT id, status, raw_data_snapshot FROM notification_deliveries
                        WHERE user_id=? AND company_id=? AND notification_type=?""",
                     (d["user_id"], str(d["company_id"]), notif_type),
                 ).fetchone()
+                if (existing and notif_type == 'UPDATE' and
+                        existing['status'] in ('PENDING', 'PROCESSING') and
+                        d.get('raw_data_snapshot') is not None and
+                        d['raw_data_snapshot'] != existing['raw_data_snapshot']):
+                    # Roll back the whole recipient enqueue unit. The persisted
+                    # admin/fanout obligation remains retryable rather than being
+                    # acknowledged while a distinct UPDATE is silently lost.
+                    raise DeliveryFanoutDeferred('prior_update_still_pending')
 
                 if existing is None:
                     # No prior row — insert fresh.
@@ -414,6 +447,11 @@ class SQLiteDeliveryRepository(SQLiteBaseRepository):
                     # company).  Re-queue by resetting the row so the worker delivers it.
                     # NEW deliveries remain strictly one-shot per company/user pair.
                     snapshot = d.get("raw_data_snapshot")
+                    # A replay after durable enqueue but before fanout receipt
+                    # must not resend the same UPDATE. Distinct snapshots still
+                    # preserve the established later-UPDATE behavior.
+                    if snapshot is not None and snapshot == existing["raw_data_snapshot"]:
+                        continue
                     conn.execute(
                         """UPDATE notification_deliveries
                            SET status='PENDING', created_at=?, attempt_count=0,
@@ -442,14 +480,18 @@ class SQLiteDeliveryRepository(SQLiteBaseRepository):
                 # D10 disposition is unapproved; retained legacy obligations
                 # cannot re-enter automatic delivery, even after opt-in.
                 return []
+            # Python's sqlite3 context manager does not start a transaction for
+            # SELECT. Reserve the writer before reading candidates, and retain
+            # it through hydration so no second connection can claim them.
+            conn.execute("BEGIN IMMEDIATE")
+            self._recover_stale(conn, now_iso)
             # Select candidate deliveries
             cursor = conn.execute("""
                 SELECT id FROM notification_deliveries
-                WHERE (status = 'PENDING' AND attempt_count < max_attempts)
-                   OR (status = 'PROCESSING' AND lease_expires_at < ?)
-                ORDER BY created_at ASC
+                WHERE status = 'PENDING' AND attempt_count < max_attempts
+                ORDER BY created_at ASC, id ASC
                 LIMIT ?
-            """, (now_iso, batch_size))
+            """, (batch_size,))
             candidate_ids = [row["id"] for row in cursor.fetchall()]
 
             if not candidate_ids:
@@ -466,7 +508,13 @@ class SQLiteDeliveryRepository(SQLiteBaseRepository):
                 WHERE id IN ({placeholders})
             """
             conn.execute(update_sql, [lease_exp, now_iso] + candidate_ids)
-            conn.commit()
+            tokens = {}
+            for delivery_id in candidate_ids:
+                token = secrets.token_hex(32)
+                tokens[delivery_id] = token
+                conn.execute("""INSERT INTO system_state(key,value,updated_at) VALUES(?,?,?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",
+                    (self._claim_key(delivery_id), token, now_iso))
 
             # Retrieve full records with user and company data.
             # F11: prefer raw_data_snapshot (event-time state) over current DB raw_data_json.
@@ -480,54 +528,110 @@ class SQLiteDeliveryRepository(SQLiteBaseRepository):
                 WHERE d.id IN ({placeholders})
             """
             cursor = conn.execute(select_sql, candidate_ids)
-            return [dict(r) for r in cursor.fetchall()]
+            records = [dict(r) for r in cursor.fetchall()]
+            for record in records:
+                record["id"] = _ClaimedDeliveryId(record["id"], tokens[record["id"]])
+            conn.commit()
+            return records
 
-    def mark_sent(self, delivery_id: int) -> None:
+    def mark_sent(self, delivery_id: int) -> bool:
+        """Record provider acceptance only for the still-current claim."""
+        if not isinstance(delivery_id, _ClaimedDeliveryId):
+            return False
         now = datetime.now(timezone.utc).isoformat()
         with self._get_conn() as conn:
-            conn.execute("""
+            cursor = conn.execute("""
                 UPDATE notification_deliveries 
                 SET status = 'SENT', sent_at = ?, lease_expires_at = NULL, error_message = NULL
-                WHERE id = ?
-            """, (now, delivery_id))
+                WHERE id = ? AND status = 'PROCESSING' AND lease_expires_at > ?
+                  AND EXISTS(SELECT 1 FROM system_state WHERE key=? AND value=?)
+            """, (now, delivery_id, now, self._claim_key(delivery_id), delivery_id._claim_token))
+            if cursor.rowcount:
+                conn.execute("DELETE FROM system_state WHERE key=? AND value=?",
+                    (self._claim_key(delivery_id), delivery_id._claim_token))
             conn.commit()
+            return cursor.rowcount == 1
 
     def release_failed(
         self, 
         delivery_id: int, 
         error_message: str, 
         terminal: bool = False
-    ) -> None:
+    ) -> bool:
+        if not isinstance(delivery_id, _ClaimedDeliveryId):
+            return False
         now = datetime.now(timezone.utc).isoformat()
         with self._get_conn() as conn:
-            if terminal:
-                new_status = 'FAILED'
-            else:
-                # Check attempt count
-                cursor = conn.execute("SELECT attempt_count, max_attempts FROM notification_deliveries WHERE id = ?", (delivery_id,))
-                row = cursor.fetchone()
-                if row and row["attempt_count"] >= row["max_attempts"]:
-                    new_status = 'FAILED'
-                else:
-                    new_status = 'PENDING'
-
-            conn.execute("""
+            cursor = conn.execute("""
                 UPDATE notification_deliveries 
-                SET status = ?, error_message = ?, lease_expires_at = NULL, last_attempt_at = ?
-                WHERE id = ?
-            """, (new_status, error_message, now, delivery_id))
+                SET status = CASE WHEN ? OR attempt_count >= max_attempts THEN 'FAILED' ELSE 'PENDING' END,
+                    error_message = ?, lease_expires_at = NULL, last_attempt_at = ?
+                WHERE id = ? AND status = 'PROCESSING' AND lease_expires_at > ?
+                  AND EXISTS(SELECT 1 FROM system_state WHERE key=? AND value=?)
+            """, (terminal, error_message, now, delivery_id, now,
+                  self._claim_key(delivery_id), delivery_id._claim_token))
+            if cursor.rowcount:
+                conn.execute("DELETE FROM system_state WHERE key=? AND value=?",
+                    (self._claim_key(delivery_id), delivery_id._claim_token))
             conn.commit()
+            return cursor.rowcount == 1
+
+    def current_delivery_context(self, delivery_id: int) -> Optional[Dict[str, Any]]:
+        """Check authority and current consent/source state just before transport.
+
+        This read fences workers that already lost their lease. It cannot revoke
+        an SMTP call in flight or make SMTP and SQLite a single transaction.
+        """
+        if not isinstance(delivery_id, _ClaimedDeliveryId):
+            return None
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_conn() as conn:
+            columns = {r[1] for r in conn.execute('PRAGMA table_info(companies)')}
+            # Minimal legacy repository schemas have no normalized status.
+            # Missing status is unknown, never an inferred deactivation.
+            active_column = 'c.is_active' if 'is_active' in columns else 'NULL'
+            row = conn.execute(f"""SELECT u.is_active, u.is_verified, u.graduation_year,
+                    u.branch_canonical, p.pref_internship,p.pref_placement,p.pref_ppo,
+                    {active_column} AS company_is_active,c.raw_data_json AS current_company_json
+                FROM notification_deliveries d
+                JOIN users u ON u.id=d.user_id
+                JOIN user_preferences p ON p.user_id=u.id
+                JOIN companies c ON c.id=d.company_id
+                WHERE d.id=? AND d.status='PROCESSING' AND d.lease_expires_at>?
+                  AND EXISTS(SELECT 1 FROM system_state WHERE key=? AND value=?)""",
+                (delivery_id, now, self._claim_key(delivery_id), delivery_id._claim_token)).fetchone()
+            if not row:
+                return None
+            result = dict(row)
+            result['current_routing_available'] = {'organizations', 'eligible_programs'}.issubset(columns)
+            return result
+
+    def _recover_stale(self, conn, now):
+        cursor = conn.execute("""UPDATE notification_deliveries
+            SET status=CASE WHEN attempt_count>=max_attempts THEN 'FAILED' ELSE 'PENDING' END,
+                lease_expires_at=NULL,
+                error_message=CASE WHEN attempt_count>=max_attempts
+                    THEN 'Retry attempts exhausted after expired lease' ELSE error_message END
+            WHERE status='PROCESSING' AND lease_expires_at<=?""", (now,))
+        recovered = cursor.rowcount
+        # Includes crash leftovers and rows removed by unsubscribe/cancellation.
+        # A live owner's key always has a matching PROCESSING row and survives.
+        conn.execute("""DELETE FROM system_state WHERE key LIKE ?
+            AND NOT EXISTS(SELECT 1 FROM notification_deliveries d
+                WHERE system_state.key=? || d.id AND d.status='PROCESSING')""",
+            (self._CLAIM_PREFIX + "%", self._CLAIM_PREFIX))
+        conn.execute("""UPDATE notification_deliveries SET status='FAILED',
+            error_message='Retry attempts exhausted' WHERE status='PENDING' AND attempt_count>=max_attempts""")
+        return recovered
 
     def recover_stale_leases(self) -> int:
         now = datetime.now(timezone.utc).isoformat()
         with self._get_conn() as conn:
-            cursor = conn.execute("""
-                UPDATE notification_deliveries
-                SET status = 'PENDING', lease_expires_at = NULL
-                WHERE status = 'PROCESSING' AND lease_expires_at < ?
-            """, (now,))
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            recovered = self._recover_stale(conn, now)
             conn.commit()
-            return cursor.rowcount
+            return recovered
 
     def cancel_pending_deliveries_for_user(self, user_id: int) -> int:
         with self._get_conn() as conn:
