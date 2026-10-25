@@ -37,7 +37,15 @@ services:
     image: tpo-operator-mfa:stage-c2
     container_name: tpo-operator-qualification
     network_mode: "none"
-    command: ["sh", "-c", "python /opt/operator_tool/test_lock_concurrency.py && python /opt/operator_tool/test_lock_deterministic.py && python /opt/operator_tool/test_adversarial_mfa_operator.py"]
+    # Docker semantics: `command` overrides CMD, NOT ENTRYPOINT. The image's
+    # ENTRYPOINT is the MFA CLI, so the previous bare `command:` would have
+    # been passed as ARGUMENTS to the CLI (argparse failure). Override the
+    # entrypoint explicitly for the offline suite run (run-2 correction) and
+    # include the non-root Chromium launch smoke plus the orphan-process
+    # probe at the end of the chain.
+    entrypoint: ["sh", "-c"]
+    command:
+      - python /opt/operator_tool/test_lock_concurrency.py && python /opt/operator_tool/test_lock_deterministic.py && python /opt/operator_tool/test_adversarial_mfa_operator.py && python /opt/operator_tool/test_chromium_probe.py && python /opt/operator_tool/chromium_smoke.py && sh /opt/operator_tool/chromium_orphan_probe.sh
     restart: "no"
 
   operator-mfa:

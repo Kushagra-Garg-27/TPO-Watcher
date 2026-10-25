@@ -38,9 +38,15 @@ RUN apt-get update \
 
 WORKDIR /opt/operator_tool
 COPY requirements.txt /opt/operator_tool/requirements.txt
+# Browsers are installed to an explicit SHARED path (not the builder user's
+# home cache): Playwright resolves $PLAYWRIGHT_BROWSERS_PATH at runtime, and
+# a home-cache install under /root would be neither addressable nor readable
+# by the non-root runtime user below (confirmed defect, run-2 correction).
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 RUN pip install --no-cache-dir -r requirements.txt \
     && playwright install --with-deps chromium \
-    && playwright cache prune
+    && playwright cache prune \
+    && chmod -R a+rX /opt/ms-playwright
 
 COPY . /opt/operator_tool/
 

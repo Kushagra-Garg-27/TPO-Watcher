@@ -1,28 +1,37 @@
-name: Operator MFA tool - exact-tip ARM64 qualification
+name: Operator MFA tool - exact-tip ARM64 qualification (run 2)
 
 # Stage C2 exact-tip qualification workflow for the STANDALONE operator tool.
 #
-# TRIGGER POLICY (2026-10-26 correction): GitHub requires a workflow_dispatch
-# workflow to exist on the repository default branch before it can be run
-# manually; this workflow lives only on the dedicated tooling branch, so
-# dispatch is not a viable one-run path. The trigger is therefore a PUSH
-# event strictly filtered to the single dedicated branch, with a
-# branch-CREATION gate: only the first push that CREATES the remote branch
-# runs the qualification; any later update or force push fails closed
-# without executing a single suite.
+# TRIGGER POLICY: push strictly filtered to the single dedicated run-2
+# branch, gated on branch CREATION (github.event.created) and non-force.
+# The first-run branch (codex/stage-c2-operator-arm64-qualification-20261026)
+# is consumed: its creation event already fired once and update pushes fail
+# the creation gate by design. This v2 branch carries the run-2 corrections.
 #
-#   on: push (branches: [codex/stage-c2-operator-arm64-qualification-20261026])
+# RUN-2 CORRECTIONS over the failed run 40238542734:
+#   1. checkout fetch-depth: 0 - the run-1 ancestry gate ran against a
+#      depth-1 shallow checkout in which the required ancestor commit object
+#      was absent (git merge-base failed with "Not a valid commit name").
+#   2. Explicit fail-closed object-existence check BEFORE the ancestry test.
+#   3. Fail-closed application-invariance diff (a suppressed git error can
+#      never masquerade as an empty diff).
+#   4. Non-root Chromium accessibility: browsers install to a shared
+#      PLAYWRIGHT_BROWSERS_PATH readable by uid 1000; a real Chromium launch
+#      smoke runs inside the network-disabled container as the runtime user.
+#   5. Orphan-Chromium detection via /proc comm inspection (the previous
+#      `pgrep -f chromium` could match its own wrapper command line).
+#   6. Honest receipts: expected vs started vs passed vs failed per suite
+#      and per container check; the summary can never claim suites that did
+#      not execute, and no qualified verdict is printed unless every gate
+#      actually ran and passed.
 #
-# There are deliberately NO push triggers for any other ref and NO pull
-# request, manual, scheduled or release triggers. Nothing in this workflow
-# touches production, VIERP, EC2, or the qualified watcher application
-# (which is used ONLY as an unmodified, read-only interoperability
-# reference; it is never rebuilt or deployed here).
+# Nothing here touches production, VIERP, EC2, or the qualified watcher
+# application (used ONLY as an unmodified, read-only interop reference).
 
 on:
   push:
     branches:
-      - codex/stage-c2-operator-arm64-qualification-20261026
+      - codex/stage-c2-operator-arm64-qualification-20261026-v2
 
 permissions:
   contents: read
@@ -33,13 +42,13 @@ defaults:
 
 env:
   QUALIFIED_APP_COMMIT: f4def963294723ae57cdad5cd93b5e3f38667502
-  APPROVED_OPERATOR_SUBTREE: 3ce79e6bf3fe170e813f28e82bb39d41eecaf448
+  APPROVED_OPERATOR_SUBTREE: 4fd93cd6472bbbdb32a75d4d375c9c6b43ff40a5
   REQUIRED_ANCESTOR: 8d82097157616597d03a3f62ef08b3a55c656a5b
-  QUALIFICATION_BRANCH: codex/stage-c2-operator-arm64-qualification-20261026
+  QUALIFICATION_BRANCH: codex/stage-c2-operator-arm64-qualification-20261026-v2
 
 jobs:
   operator-arm64-qualification:
-    name: Standalone operator tool - native ARM64 qualification
+    name: Standalone operator tool - native ARM64 qualification (run 2)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
 
@@ -52,8 +61,10 @@ jobs:
           test '${{ github.event.forced }}' = "false" || { echo "FORCED_PUSH_REJECTED"; exit 1; }
           echo "TRIGGER_OK: one-time branch-creation push of $QUALIFICATION_BRANCH"
 
-      - name: Checkout exact pushed tip
+      - name: Checkout exact pushed tip (FULL history for ancestry gates)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
 
       - name: Gate - genuine aarch64 host
         run: |
@@ -66,8 +77,17 @@ jobs:
           test "$GITHUB_SHA" = "$HEAD_SHA" || { echo "CHECKOUT_SHA_MISMATCH ($GITHUB_SHA vs $HEAD_SHA)"; exit 1; }
           echo "QUALIFICATION_COMMIT_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
 
-      - name: Gate - approved operator subtree and required ancestry
+      - name: Gate - approved operator subtree and required ancestry (run-2 corrected)
         run: |
+          # Ancestor object existence asserted BEFORE use: in run 1 the
+          # shallow checkout lacked the ancestor object entirely and
+          # merge-base failed with a misleading label.
+          if ! git cat-file -e "$REQUIRED_ANCESTOR^{commit}"; then
+            echo "REQUIRED_ANCESTOR_ABSENT (fetch-depth too shallow?)"; exit 1
+          fi
+          if ! git cat-file -e "HEAD^{commit}"; then
+            echo "HEAD_COMMIT_ABSENT"; exit 1
+          fi
           SUBTREE="$(git rev-parse HEAD:operator_tool)"
           test "$SUBTREE" = "$APPROVED_OPERATOR_SUBTREE" || { echo "OPERATOR_SUBTREE_MISMATCH: $SUBTREE"; exit 1; }
           git merge-base --is-ancestor "$REQUIRED_ANCESTOR" HEAD || { echo "ANCESTRY_MISMATCH"; exit 1; }
@@ -80,17 +100,31 @@ jobs:
             echo "### Exact-tip identity (numerical receipts only)"
             echo ""
             echo "- host_arch=aarch64"
-            echo "- event=push(branch-creation, single dedicated branch)"
+            echo "- event=push(branch-creation, single dedicated run-2 branch)"
             echo "- tooling_commit_sha_length=${#QUALIFICATION_COMMIT_SHA}"
             echo "- tooling_tree_sha_length=${#TREE_SHA}"
             echo "- operator_tool_subtree_matches_approved=true"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Gate - qualified application byte-invariance
+      - name: Gate - qualified application byte-invariance (fail-closed)
         run: |
-          DIFF="$(git diff --name-only "$QUALIFIED_APP_COMMIT" HEAD -- app/ tests/ Dockerfile requirements.txt docker-compose.yml .dockerignore || true)"
-          if [ -n "$DIFF" ]; then echo "APPLICATION_BYTES_CHANGED"; exit 1; fi
-          python -I -B operator_tool/verify_production_build_exclusion.py
+          # 1. Baseline must be a valid, locally available commit object.
+          if ! git cat-file -e "$QUALIFIED_APP_COMMIT^{commit}"; then
+            echo "QUALIFIED_BASELINE_UNAVAILABLE"; exit 1
+          fi
+          # 2. The diff itself must succeed; a git error must never be
+          #    interpretable as an empty diff (run-2 correction: no `|| true`).
+          set +e
+          DIFF_OUTPUT="$(git diff --name-only "$QUALIFIED_APP_COMMIT" HEAD -- app/ tests/ Dockerfile requirements.txt docker-compose.yml .dockerignore)"
+          DIFF_RC=$?
+          set -e
+          if [ "$DIFF_RC" -ne 0 ]; then
+            echo "APP_DIFF_COMMAND_FAILED rc=$DIFF_RC"; exit 1
+          fi
+          if [ -n "$DIFF_OUTPUT" ]; then
+            echo "APPLICATION_BYTES_CHANGED"; exit 1
+          fi
+          operator_tool/run_qual_suite.sh build_exclusion python -I -B operator_tool/verify_production_build_exclusion.py
 
       - name: Setup CPython 3.12 (pinned)
         uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
@@ -102,72 +136,98 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r operator_tool/requirements.txt -r requirements.txt
           python -m playwright install --with-deps chromium
-          pip freeze | sed -n 's/^\([A-Za-z0-9_.-]*\)==.*/\1 pinned/p' | sort -u | head -40
           echo "PINNED_PACKAGE_COUNT=$(pip freeze | wc -l)" >> "$GITHUB_ENV"
 
       - name: Suite - deterministic interprocess locking (fcntl.flock)
-        run: python -I -B operator_tool/test_lock_deterministic.py
+        run: operator_tool/run_qual_suite.sh lock_deterministic python -I -B operator_tool/test_lock_deterministic.py
 
       - name: Suite - cross-process lock concurrency
-        run: python -I -B operator_tool/test_lock_concurrency.py
+        run: operator_tool/run_qual_suite.sh lock_concurrency python -I -B operator_tool/test_lock_concurrency.py
 
       - name: Suite - publication fault injection
-        run: python -I -B operator_tool/test_publication_faults.py
+        run: operator_tool/run_qual_suite.sh publication_faults python -I -B operator_tool/test_publication_faults.py
 
       - name: Suite - adversarial operator scenarios (real Chromium, fictional loopback portal)
-        run: python -I -B operator_tool/test_adversarial_mfa_operator.py
+        run: operator_tool/run_qual_suite.sh adversarial python -I -B operator_tool/test_adversarial_mfa_operator.py
 
       - name: Suite - Linux filesystem fixtures (permissions, symlinks, mtime precision)
-        run: python -I -B operator_tool/test_linux_fixtures.py
+        run: operator_tool/run_qual_suite.sh linux_fixtures python -I -B operator_tool/test_linux_fixtures.py
 
       - name: Suite - qualified watcher interoperability (read-only reference)
-        run: python -I -B operator_tool/test_watcher_interop.py
+        run: operator_tool/run_qual_suite.sh watcher_interop python -I -B operator_tool/test_watcher_interop.py
 
       - name: Suite - Stage B exclusive placement mechanism (stubbed git/docker)
-        run: python -I -B operator_tool/test_stage_b_exclusive_placement.py
+        run: operator_tool/run_qual_suite.sh stage_b_placement python -I -B operator_tool/test_stage_b_exclusive_placement.py
 
       - name: Build standalone ARM64 operator container (isolated context)
         run: |
-          docker build -f operator_tool/Dockerfile -t tpo-operator-mfa:stage-c2-qual operator_tool/
+          operator_tool/run_qual_suite.sh container_build docker build \
+            -f operator_tool/Dockerfile -t tpo-operator-mfa:stage-c2-qual operator_tool/
           test "$(docker image inspect tpo-operator-mfa:stage-c2-qual --format '{{.Architecture}}')" = "arm64"
           test "$(docker image inspect tpo-operator-mfa:stage-c2-qual --format '{{.Os}}')" = "linux"
 
       - name: Gate - container security boundaries (non-root, no ports, no socket, no secrets)
         run: |
-          USER="$(docker image inspect tpo-operator-mfa:stage-c2-qual --format '{{.Config.User}}')"
-          ENTRY="$(docker image inspect tpo-operator-mfa:stage-c2-qual --format '{{json .Config.Entrypoint}}')"
-          PORTS="$(docker image inspect tpo-operator-mfa:stage-c2-qual --format '{{json .Config.ExposedPorts}}')"
-          ENVV="$(docker image inspect tpo-operator-mfa:stage-c2-qual --format '{{json .Config.Env}}')"
-          test "$USER" = "operator"
-          test "$PORTS" = "null" || test -z "$PORTS"
-          echo "$ENVV" | grep -Eiq '(secret|password|token|otp|credential)' && { echo "SECRET_ENV_LEAK"; exit 1; } || true
-          echo "CONTAINER_USER_OK=1 CONTAINER_PORTS_EMPTY=1"
-          echo "ENTRYPOINT_COUNT=$(echo "$ENTRY" | tr -cd ',' | wc -c)"
+          operator_tool/run_qual_suite.sh container_boundaries sh -c '
+            USER="$(docker image inspect tpo-operator-mfa:stage-c2-qual --format "{{.Config.User}}")"
+            PORTS="$(docker image inspect tpo-operator-mfa:stage-c2-qual --format "{{json .Config.ExposedPorts}}")"
+            ENVV="$(docker image inspect tpo-operator-mfa:stage-c2-qual --format "{{json .Config.Env}}")"
+            test "$USER" = "operator"
+            test "$PORTS" = "null" || test -z "$PORTS"
+            echo "$ENVV" | grep -Eiq "(secret|password|token|otp|credential)" && exit 1 || true
+            echo CONTAINER_BOUNDARIES_OK'
 
-      - name: Run - fictional browser suites inside the network-disabled container
+      - name: Run - offline suites + real Chromium smoke + orphan probe inside network-disabled container (non-root)
         run: |
-          docker run --rm --network none --entrypoint sh tpo-operator-mfa:stage-c2-qual -c \
+          operator_tool/run_qual_suite.sh container_suites docker run --rm --network none --entrypoint sh tpo-operator-mfa:stage-c2-qual -c \
             "python /opt/operator_tool/test_lock_concurrency.py && \
              python /opt/operator_tool/test_lock_deterministic.py && \
              python /opt/operator_tool/test_adversarial_mfa_operator.py && \
-             { pgrep -f chromium >/dev/null 2>&1 && { echo ORPHAN_CHROMIUM; exit 1; } || echo CHROMIUM_CLEAN; }"
+             python /opt/operator_tool/test_chromium_probe.py && \
+             python /opt/operator_tool/chromium_smoke.py && \
+             sh /opt/operator_tool/chromium_orphan_probe.sh"
 
       - name: Run - non-root identity proof inside the container
         run: |
-          ID_OUT="$(docker run --rm --network none --entrypoint id tpo-operator-mfa:stage-c2-qual)"
-          echo "$ID_OUT" | grep -q 'uid=1000(operator)' || { echo "NOT_NON_ROOT"; exit 1; }
-          echo "CONTAINER_NON_ROOT_OK=1"
+          operator_tool/run_qual_suite.sh container_nonroot sh -c \
+            'docker run --rm --network none --entrypoint id tpo-operator-mfa:stage-c2-qual | grep -q "uid=1000(operator)"'
 
-      - name: Receipts - sanitized numerical summary (zero failures, zero skips, zero deferrals)
+      - name: Receipts - honest per-suite summary and completeness verdict
         if: always()
         run: |
+          STATE="${RUNNER_TEMP:-/tmp}/qual_state/events.log"
+          EXPECTED_SUITES="lock_deterministic lock_concurrency publication_faults adversarial linux_fixtures watcher_interop stage_b_placement"
+          EXPECTED_CHECKS="build_exclusion container_build container_boundaries container_suites container_nonroot"
+          passed=0; failed=0; started=0; never=0
           {
             echo ""
             echo "### Qualification receipts (sanitized, numerical only)"
             echo ""
-            echo "- pinned_package_count=${PINNED_PACKAGE_COUNT:-unknown}"
-            echo "- suites_dispatched=7"
-            echo "- container_checks=4"
-            echo "- verdict_policy=zero_failures_zero_skips_zero_deferrals"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "Numerical receipts emitted to the job summary."
+          for name in $EXPECTED_SUITES $EXPECTED_CHECKS; do
+            if grep -q "^passed $name$" "$STATE" 2>/dev/null; then
+              passed=$((passed+1))
+            elif grep -q "^failed $name" "$STATE" 2>/dev/null; then
+              failed=$((failed+1)); started=$((started+1))
+            elif grep -q "^started $name$" "$STATE" 2>/dev/null; then
+              started=$((started+1))
+            else
+              never=$((never+1))
+            fi
+          done
+          total_expected=$(($(echo $EXPECTED_SUITES $EXPECTED_CHECKS | wc -w)))
+          {
+            echo "- expected_gates=$total_expected"
+            echo "- gates_passed=$passed"
+            echo "- gates_failed=$failed"
+            echo "- gates_started_not_completed=$((started))"
+            echo "- gates_never_started=$never"
+            echo "- pinned_package_count=${PINNED_PACKAGE_COUNT:-unknown}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$passed" -eq "$total_expected" ] && [ "$failed" -eq 0 ] && [ "$never" -eq 0 ]; then
+            echo "ALL_GATES_SATISFIED_AND_EXECUTED" >> "$GITHUB_STEP_SUMMARY"
+            echo "ALL_GATES_SATISFIED_AND_EXECUTED"
+          else
+            echo "QUALIFICATION_INCOMPLETE (passed=$passed failed=$failed never_started=$never of $total_expected)" >> "$GITHUB_STEP_SUMMARY"
+            echo "QUALIFICATION_INCOMPLETE (passed=$passed failed=$failed never_started=$never of $total_expected)"
+          fi
