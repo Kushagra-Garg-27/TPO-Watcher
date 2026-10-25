@@ -168,27 +168,26 @@ class PlacementWatcher:
         return complete
 
     def is_mfa_paused(self) -> bool:
-        """Returns True if automated checks are paused awaiting MFA resolution.
-
-        Auto-unpauses if a newer session state file has been placed since the pause."""
+        """Returns True if automated checks are paused awaiting MFA resolution."""
         if not hasattr(self.db, "get_system_state"):
             return False
-        if self.db.get_system_state("mfa_pending") != "true":
-            return False
+        return self.db.get_system_state("mfa_pending") == "true"
 
+    def has_session_file_been_refreshed(self) -> bool:
+        """Checks if session file mtime is strictly newer than the mtime when MFA pause was engaged."""
+        if not hasattr(self.db, "get_system_state"):
+            return False
         paused_mtime = self.db.get_system_state("mfa_paused_state_mtime")
+        if not paused_mtime:
+            return False
         state_file = self.auth.state_file if (self.auth and hasattr(self.auth, "state_file")) else get_state_file_path()
-        if os.path.exists(state_file) and paused_mtime:
+        if os.path.exists(state_file):
             try:
                 curr_mtime = os.path.getmtime(state_file)
-                if curr_mtime > float(paused_mtime):
-                    self.db.set_system_state("mfa_pending", "false")
-                    self.db.set_system_state("auth_status", "SESSION_REFRESHED")
-                    logger.info("Session state file was refreshed; clearing MFA pause.")
-                    return False
+                return curr_mtime > float(paused_mtime)
             except (OSError, ValueError):
-                pass
-        return True
+                return False
+        return False
 
     def reset_auth_pause(self):
         """Explicit authorized reset of the MFA pause state."""
@@ -215,10 +214,34 @@ class PlacementWatcher:
 
         # Guard: check if automated polling is paused awaiting human MFA resolution
         if self.is_mfa_paused():
-            logger.warning("Scheduled check skipped: MFA authentication remains pending human action.")
-            self.record_heartbeat_failure()
-            send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
-            return False
+            if self.has_session_file_been_refreshed():
+                logger.info("Newer session state file detected during MFA pause; verifying session...")
+                state_path = self.auth.state_file if (self.auth and hasattr(self.auth, "state_file")) else get_state_file_path()
+                curr_mtime = str(os.path.getmtime(state_path)) if os.path.exists(state_path) else "0"
+                
+                is_valid = False
+                try:
+                    is_valid = await self.auth.is_authenticated()
+                except Exception:
+                    is_valid = False
+
+                if is_valid:
+                    logger.info("Refreshed session successfully verified as authenticated. Clearing MFA pause.")
+                    self.db.set_system_state("mfa_pending", "false")
+                    self.db.set_system_state("auth_status", AuthState.AUTHENTICATED.value)
+                else:
+                    logger.warning("Refreshed session file failed authentication verification. Remaining paused.")
+                    self.db.set_system_state("mfa_paused_state_mtime", curr_mtime)
+                    if self.auth and hasattr(self.auth, "stop"):
+                        await self.auth.stop()
+                    self.record_heartbeat_failure()
+                    send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
+                    return False
+            else:
+                logger.warning("Scheduled check skipped: MFA authentication remains pending human action.")
+                self.record_heartbeat_failure()
+                send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
+                return False
 
         max_attempts = 2
         for attempt in range(max_attempts):
@@ -324,20 +347,13 @@ class PlacementWatcher:
             except AuthenticationError:
                 logger.warning("Authentication failure detected during check.")
                 if attempt < max_attempts - 1:
-                    logger.info("Recovering session: clearing expired state and re-authenticating...")
+                    logger.info("Recovering session: re-authenticating with fresh session context...")
                     if self.auth and hasattr(self.auth, "stop"):
                         await self.auth.stop()
-                    if self.auth and hasattr(self.auth, "clear_session_state"):
-                        self.auth.clear_session_state()
-                    else:
-                        state_path = getattr(self.auth, "state_file", get_state_file_path())
-                        if os.path.exists(state_path):
-                            try:
-                                os.remove(state_path)
-                            except Exception:
-                                pass
+                    # Do not delete session file here; save_storage_state_safe atomically replaces
+                    # on successful login. If re-auth fails or hits MFA, original file is preserved.
                     self.auth = AuthManager()
-                    logger.info("Retrying API request with fresh authenticated session...")
+                    logger.info("Retrying API request with fresh session...")
                     continue
                 else:
                     logger.error("Authentication recovery failed after re-authentication attempt.")

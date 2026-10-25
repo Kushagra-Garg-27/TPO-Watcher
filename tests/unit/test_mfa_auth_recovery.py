@@ -281,7 +281,8 @@ async def test_failed_login_never_deletes_existing_session_file(tmp_path):
 
 @pytest.mark.asyncio
 async def test_save_storage_state_safe_uses_atomic_replacement(tmp_path):
-    state_file = tmp_path / "playwright_state.json"
+    subdir = tmp_path / "protected_sessions"
+    state_file = subdir / "playwright_state.json"
 
     manager = AuthManager()
     manager.state_file = str(state_file)
@@ -297,6 +298,7 @@ async def test_save_storage_state_safe_uses_atomic_replacement(tmp_path):
 
     assert state_file.exists()
     assert json.loads(state_file.read_text()) == {"cookies": [{"name": "fresh", "value": "ok"}]}
+    assert subdir.exists()
 
 
 def test_clear_session_state_removes_file(tmp_path):
@@ -409,7 +411,7 @@ async def test_watcher_pauses_on_mfa_without_credential_retry_storm(tmp_path):
 async def test_watcher_resumes_after_session_file_refreshed(tmp_path):
     db_path = str(tmp_path / "test_mfa_refresh.sqlite")
     state_file = tmp_path / "playwright_state.json"
-    state_file.write_text('{"cookies":[]}')
+    state_file.write_text('{"cookies":[{"name":"auth","value":"valid"}]}')
 
     repo = DatabaseRepository(db_path)
     repo.set_baseline_initialized()
@@ -419,14 +421,27 @@ async def test_watcher_resumes_after_session_file_refreshed(tmp_path):
 
     watcher = PlacementWatcher(db=repo)
     watcher.auth.state_file = str(state_file)
+    watcher.auth.is_authenticated = AsyncMock(return_value=True)
+    watcher.auth.get_valid_page = AsyncMock(return_value=FictionalPage())
+    watcher.auth.stop = AsyncMock()
 
     # Touch the file to give it a newer mtime
     os.utime(str(state_file), None)
 
-    # Verify is_mfa_paused auto-clears the pause
-    assert watcher.is_mfa_paused() is False
+    # 1. Initially is_mfa_paused is still True (pause not cleared on mtime alone)
+    assert watcher.is_mfa_paused() is True
+    assert watcher.has_session_file_been_refreshed() is True
+
+    # 2. Check execution: verifies the refreshed session, clears pause, and succeeds
+    with patch("app.monitoring.watcher.TPOClient") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.fetch_companies = AsyncMock(return_value=[])
+        mock_client_cls.return_value = mock_client
+        result = await watcher.check_once()
+
+    assert result is True
     assert repo.get_system_state("mfa_pending") == "false"
-    assert repo.get_system_state("auth_status") == "SESSION_REFRESHED"
+    assert repo.get_system_state("auth_status") == AuthState.AUTHENTICATED.value
 
 
 @pytest.mark.asyncio
@@ -482,3 +497,114 @@ async def test_auth_failure_preserves_company_records_and_sends_no_notifications
     assert count == 0
     # 4. Heartbeat failure recorded accurately
     assert int(repo.get_system_state("consecutive_watcher_failures")) >= 1
+
+
+# ==============================================================================
+# 9. Adversarial Review Hardening Regressions
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_mfa_paused_state_does_not_clear_or_retry_credentials_on_invalid_session_touch(tmp_path):
+    """
+    Risk 1 & 2: Touching session file must NOT clear mfa_pending or trigger
+    unattended credential retries if the replacement session does not authenticate.
+    """
+    db_path = str(tmp_path / "test_mfa_touch.sqlite")
+    state_file = tmp_path / "playwright_state.json"
+    state_file.write_text('{"cookies":[]}')
+
+    repo = DatabaseRepository(db_path)
+    repo.set_baseline_initialized()
+    repo.set_system_state("mfa_pending", "true")
+    repo.set_system_state("auth_status", AuthState.MFA_VERIFICATION_REQUIRED.value)
+    # Pause timestamp in the past
+    past_mtime = time.time() - 200
+    repo.set_system_state("mfa_paused_state_mtime", str(past_mtime))
+
+    # Touch file so curr_mtime > past_mtime
+    os.utime(str(state_file), None)
+
+    watcher = PlacementWatcher(db=repo)
+    watcher.auth = AuthManager()
+    watcher.auth.state_file = str(state_file)
+    watcher.auth.context = MagicMock()
+    watcher.auth.start = AsyncMock()
+    watcher.auth.stop = AsyncMock()
+
+    # The replacement session fails authentication (e.g. invalid/expired cookies)
+    watcher.auth.is_authenticated = AsyncMock(return_value=False)
+    watcher.auth.login = AsyncMock()
+
+    # Run check_once
+    result = await watcher.check_once()
+    assert result is False
+
+    # CRITICAL: login() must NEVER be called with credentials
+    assert watcher.auth.login.await_count == 0
+    # CRITICAL: mfa_pending must remain true
+    assert repo.get_system_state("mfa_pending") == "true"
+
+
+@pytest.mark.asyncio
+async def test_http_403_does_not_destroy_reusable_session_file(tmp_path):
+    """
+    Risk 3: Ambiguous HTTP 403 authorization failures must not delete the session file
+    during watcher retry or recovery attempts.
+    """
+    db_path = str(tmp_path / "test_403.sqlite")
+    state_file = tmp_path / "playwright_state.json"
+    original_bytes = b'{"cookies":[{"name":"auth","value":"valid-token"}]}'
+    state_file.write_bytes(original_bytes)
+
+    repo = DatabaseRepository(db_path)
+    repo.set_baseline_initialized()
+
+    watcher = PlacementWatcher(db=repo)
+    watcher.auth = AuthManager()
+    watcher.auth.state_file = str(state_file)
+    watcher.auth.is_authenticated = AsyncMock(return_value=True)
+    watcher.auth.get_valid_page = AsyncMock(return_value=FictionalPage())
+    watcher.auth.stop = AsyncMock()
+
+    # Simulate fetch_companies raising AuthenticationError (HTTP 401/403)
+    mock_fresh_auth = MagicMock()
+    mock_fresh_auth.state_file = str(state_file)
+    mock_fresh_auth.is_authenticated = AsyncMock(return_value=False)
+    mock_fresh_auth.get_valid_page = AsyncMock(side_effect=ReauthenticationRequiredError())
+    mock_fresh_auth.stop = AsyncMock()
+
+    with patch("app.monitoring.watcher.TPOClient") as mock_client_cls, \
+         patch("app.monitoring.watcher.AuthManager", return_value=mock_fresh_auth):
+        mock_client = MagicMock()
+        mock_client.fetch_companies = AsyncMock(side_effect=AuthenticationError("Session expired (HTTP 401/403)"))
+        mock_client_cls.return_value = mock_client
+
+        # Run check_once
+        result = await watcher.check_once()
+
+    assert result is False
+
+    # CRITICAL: Session file must NOT be deleted!
+    assert state_file.exists()
+    assert state_file.read_bytes() == original_bytes
+
+
+@pytest.mark.asyncio
+async def test_has_authenticated_dom_markers_requires_specific_post_login_elements():
+    """
+    Risk 8: Generic /home link must NOT falsely satisfy authenticated DOM markers.
+    """
+    manager = AuthManager()
+    # Page with only a generic /home link (e.g. brand logo) but no logout or dashboard
+    manager.page = FictionalPage(
+        url="https://tpo.vierp.in/home",
+        selectors={
+            "a[href='/home']": FictionalLocator(count=1),
+            "a[href='/company-dashboard']": FictionalLocator(count=0),
+            "logout": FictionalLocator(count=0),
+            "password": FictionalLocator(count=0),
+        }
+    )
+    # Must return False because specific authenticated elements (dashboard/logout) are absent
+    assert await manager._has_authenticated_dom_markers() is False
+

@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import logging
 from enum import Enum
 from typing import Optional, Dict, Tuple
@@ -305,12 +306,11 @@ class AuthManager:
             if await self._detect_mfa_enrollment() or await self._detect_mfa_verification():
                 return False
                 
-            # 3. Must have at least one recognized authenticated element:
+            # 3. Must have at least one recognized authenticated element (dashboard link or logout button):
             dashboard_link = await self.page.locator("a[href='/company-dashboard']").count()
             logout_elem = await self.page.locator("a[href*='logout' i], button:has-text('Logout'), a:has-text('Logout')").count()
-            home_nav = await self.page.locator("a[href='/home']").count()
             
-            return (dashboard_link > 0 or logout_elem > 0 or home_nav > 0)
+            return (dashboard_link > 0 or logout_elem > 0)
         except Exception:
             return False
 
@@ -378,14 +378,16 @@ class AuthManager:
     async def save_storage_state_safe(self):
         """
         Saves Playwright storage state using atomic replacement and protected file permissions.
+        Ensures restrictive parent directory permissions (0700) and file permissions (0600)
+        without symlink vulnerability or world-readable write windows.
         """
         if not self.context:
             return
         state_dir = os.path.dirname(os.path.abspath(self.state_file))
         if state_dir and not os.path.exists(state_dir):
-            os.makedirs(state_dir, exist_ok=True)
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
             
-        tmp_file = f"{self.state_file}.tmp.{os.getpid()}"
+        tmp_file = f"{self.state_file}.tmp.{os.getpid()}.{int(time.time() * 1000)}"
         try:
             await self.context.storage_state(path=tmp_file)
             if hasattr(os, "chmod"):
@@ -394,6 +396,11 @@ class AuthManager:
                 except OSError:
                     pass
             os.replace(tmp_file, self.state_file)
+            if hasattr(os, "chmod"):
+                try:
+                    os.chmod(self.state_file, 0o600)
+                except OSError:
+                    pass
             logger.info("Session state saved to storage at %s.", self.state_file)
         except Exception as e:
             logger.error("Failed to save session state safely (%s).", type(e).__name__)
