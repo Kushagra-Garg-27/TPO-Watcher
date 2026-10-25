@@ -18,6 +18,29 @@ _PRIVATE_FIELD = re.compile(
     r"[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)", re.IGNORECASE)
 
 
+def _redact_values(message, values):
+    # Find matches in the original text. Sequential replacement can expose
+    # fragments when a username is contained in, or overlaps, another secret.
+    spans = []
+    for value in {v for v in values if isinstance(v, str) and v}:
+        start = message.find(value)
+        while start != -1:
+            spans.append((start, start + len(value)))
+            start = message.find(value, start + 1)
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    parts, cursor = [], 0
+    for start, end in merged:
+        parts.extend((message[cursor:start], "[redacted]"))
+        cursor = end
+    parts.append(message[cursor:])
+    return "".join(parts)
+
+
 class PrivacyFormatter(logging.Formatter):
     """Defense at the shared console boundary, in addition to safe call sites.
 
@@ -45,10 +68,8 @@ class PrivacyFormatter(logging.Formatter):
         # This also bounds the work of pattern redaction on untrusted text.
         if len(message) > 4096:
             message = "log_message_oversized"
-        for name in _SENSITIVE_SETTINGS:
-            value = getattr(settings, name, None)
-            if isinstance(value, str) and value:
-                message = message.replace(value, "[redacted]")
+        message = _redact_values(
+            message, (getattr(settings, name, None) for name in _SENSITIVE_SETTINGS))
         for pattern in (_URL, _EMAIL, _PRIVATE_HEADER, _PRIVATE_FIELD):
             if pattern is _EMAIL and "@" not in message:
                 continue

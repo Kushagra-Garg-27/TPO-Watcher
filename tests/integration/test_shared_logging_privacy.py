@@ -66,6 +66,20 @@ def test_oversized_message_is_withheld_before_pattern_redaction(console):
     assert len(output) < 200
 
 
+@pytest.mark.parametrize("username,password,message,expected", [
+    ("student42", "prefix-student42-suffix", "prefix-student42-suffix", "[redacted]"),
+    ("abcdef", "defghi", "abcdefghi", "[redacted]"),
+    ("student42", "prefix-student42-suffix",
+     "prefix-student42-suffix prefix-student42-suffix", "[redacted] [redacted]"),
+])
+def test_overlapping_configured_credentials_are_fully_withheld(
+        console, monkeypatch, username, password, message, expected):
+    monkeypatch.setattr(settings, "TPO_USERNAME", username)
+    monkeypatch.setattr(settings, "TPO_PASSWORD", password)
+    logging.getLogger("app.provider").warning(message)
+    assert console.getvalue().split("WARNING: ", 1)[1].strip() == expected
+
+
 def test_shared_sink_suppresses_exception_arguments_and_traceback_text(console):
     private = "fictional-unstructured-provider-rejection-384"
     try:
