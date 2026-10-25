@@ -223,8 +223,8 @@ class PlacementWatcher:
                 send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=True)
                 return True
                 
-            except AuthenticationError as e:
-                logger.warning(f"Authentication failure detected during check: {e}")
+            except AuthenticationError:
+                logger.warning("Authentication failure detected during check.")
                 if attempt < max_attempts - 1:
                     logger.info("Recovering session: clearing expired state and re-authenticating...")
                     await self.auth.stop()
@@ -303,8 +303,8 @@ class PlacementWatcher:
             except asyncio.CancelledError:
                 logger.info("Pruning schedule loop stopped.")
                 break
-            except Exception as e:
-                logger.error(f"Unexpected error in pruning scheduling loop: {e}")
+            except Exception:
+                logger.error("Unexpected error in pruning scheduling loop.")
                 await asyncio.sleep(60)
 
     async def drain_once(self) -> int:
@@ -393,8 +393,8 @@ class PlacementWatcher:
             except asyncio.CancelledError:
                 logger.info("Watcher service stopped.")
                 break
-            except Exception as e:
-                logger.error(f"Unexpected error in main scheduling loop: {e}")
+            except Exception:
+                logger.error("Unexpected error in main scheduling loop.")
                 await asyncio.sleep(60)
 
     async def shutdown(self):

@@ -45,6 +45,7 @@ def get_uvicorn_config(app_obj=None) -> uvicorn.Config:
         host=settings.PUBLIC_HOST,
         port=settings.PUBLIC_PORT,
         log_level=settings.LOG_LEVEL.lower(),
+        log_config=None,
         access_log=False,
         server_header=False,
     )
