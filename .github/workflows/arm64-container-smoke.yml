@@ -191,6 +191,7 @@ jobs:
           PY
           docker run --rm --network none \
             -e DB_PATH=/tmp/smoke-disposable.sqlite \
+            -e PYTHONPATH=/app \
             -e PYTHONDONTWRITEBYTECODE=1 \
             -v "$RUNNER_TEMP/smoke.py:/smoke.py:ro" \
             --entrypoint python \
