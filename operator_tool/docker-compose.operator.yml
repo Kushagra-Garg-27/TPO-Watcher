@@ -1,0 +1,66 @@
+# Stage C2 operator tooling - run-once companion container definitions.
+#
+# NEVER started automatically by the watcher stack. Two profiles:
+#
+#   qualification - offline qualification of the tool itself. Network is
+#     fully disabled (network_mode: none; the fictional loopback portal runs
+#     inside the container); proves zero external egress, non-root runtime,
+#     and real POSIX permissions. NOTE: the watcher-interop suite is NOT run
+#     here - it requires the repository checkout and runs on the runner host.
+#
+#   operator-mfa - LIVE human-assisted provisioning. Requires ALL of:
+#     1. Separate explicit human authorization (account holder + institutional).
+#     2. The Stage B compose override already approved and placed.
+#     3. The authorized one-time session-directory ownership setup done
+#        (see the preparation report, section 4).
+#     4. An interactive terminal:
+#        docker compose -f operator_tool/docker-compose.operator.yml \
+#          --profile operator-mfa run --rm operator-mfa \
+#          -- --portal-url https://tpo.vierp.in/ --allow-origin tpo.vierp.in \
+#             --acknowledge-account-authorization
+#
+# Build context is operator_tool/ itself (full isolation from the watcher
+# sources, reports, and any local artifacts).
+#
+# Volume note: `watcher_data` is EXTERNAL with the explicit production name
+# `tpo-watcher_watcher_data`, so Compose can only ATTACH the existing
+# production volume - it can never silently create an unrelated empty one.
+# Verify with: docker compose -f operator_tool/docker-compose.operator.yml \
+#                --profile operator-mfa config
+
+services:
+  operator-qualification:
+    profiles: ["qualification"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tpo-operator-mfa:stage-c2
+    container_name: tpo-operator-qualification
+    network_mode: "none"
+    command: ["sh", "-c", "python /opt/operator_tool/test_lock_concurrency.py && python /opt/operator_tool/test_lock_deterministic.py && python /opt/operator_tool/test_adversarial_mfa_operator.py"]
+    restart: "no"
+
+  operator-mfa:
+    profiles: ["operator-mfa"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tpo-operator-mfa:stage-c2
+    container_name: tpo-operator-mfa
+    # One-shot: never restart, never daemonize.
+    restart: "no"
+    stdin_open: true
+    tty: true
+    # Only the persistent data volume is mounted, at the same path the
+    # watcher expects, so the published state lands directly in the
+    # private session directory with zero secret transit off the host.
+    volumes:
+      - watcher_data:/app/data
+    # No ports published. No CDP endpoint. The operator drives everything
+    # through the attached interactive terminal only.
+    command: ["--portal-url", "https://tpo.vierp.in/", "--state-file", "/app/data/session/playwright_state.json", "--allow-origin", "tpo.vierp.in"]
+
+volumes:
+  watcher_data:
+    external: true
+    name: tpo-watcher_watcher_data

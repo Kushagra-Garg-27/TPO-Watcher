@@ -1,0 +1,152 @@
+name: Operator MFA tool - exact-tip ARM64 qualification
+
+# Stage C2 exact-tip qualification workflow for the STANDALONE operator tool.
+#
+# TRIGGER POLICY: workflow_dispatch ONLY, on the dedicated tooling branch.
+# There is deliberately NO push/pull_request trigger: a run requires a
+# separate, explicit human dispatch authorization. Nothing in this workflow
+# touches production, VIERP, EC2, or the qualified watcher application
+# (which is used ONLY as an unmodified, read-only interoperability
+# reference; it is never rebuilt or deployed here).
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_tooling_sha:
+        description: "Optional expected tooling commit SHA (40 hex). When provided, the run aborts unless HEAD matches."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  QUALIFIED_APP_COMMIT: f4def963294723ae57cdad5cd93b5e3f38667502
+
+jobs:
+  operator-arm64-qualification:
+    name: Standalone operator tool - native ARM64 qualification
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout exact tooling tip
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Gate - genuine aarch64 host
+        run: |
+          test "$(uname -m)" = "aarch64" || { echo "HOST_NOT_ARM64"; exit 1; }
+          echo "HOST_ARCH=$(uname -m)" >> "$GITHUB_ENV"
+
+      - name: Gate - exact tooling commit and tree identity
+        run: |
+          HEAD_SHA="$(git rev-parse HEAD)"
+          TREE_SHA="$(git rev-parse 'HEAD^{tree}')"
+          TOOL_TREE="$(git rev-parse "HEAD:operator_tool")"
+          EXPECTED="${{ inputs.expected_tooling_sha }}"
+          if [ -n "$EXPECTED" ] && [ "$EXPECTED" != "$HEAD_SHA" ]; then
+            echo "TOOLING_SHA_MISMATCH"; exit 1
+          fi
+          {
+            echo "TOOLING_COMMIT_SHA=$HEAD_SHA"
+            echo "TOOLING_TREE_SHA=$TREE_SHA"
+            echo "OPERATOR_TOOL_TREE_SHA=$TOOL_TREE"
+          } >> "$GITHUB_ENV"
+          {
+            echo "### Exact-tip identity (numerical receipts only)"
+            echo ""
+            echo "- host_arch=aarch64"
+            echo "- tooling_commit_sha_length=${#HEAD_SHA}"
+            echo "- tooling_tree_sha_length=${#TREE_SHA}"
+            echo "- operator_tool_tree_sha_length=${#TOOL_TREE}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Gate - qualified application byte-invariance
+        run: |
+          DIFF="$(git diff --name-only "$QUALIFIED_APP_COMMIT" HEAD -- app/ tests/ Dockerfile requirements.txt docker-compose.yml .dockerignore || true)"
+          if [ -n "$DIFF" ]; then echo "APPLICATION_BYTES_CHANGED"; exit 1; fi
+          python -I -B operator_tool/verify_production_build_exclusion.py
+
+      - name: Setup CPython 3.12 (pinned)
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned dependencies (tool + read-only app reference)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r operator_tool/requirements.txt -r requirements.txt
+          python -m playwright install --with-deps chromium
+          pip freeze | sed -n 's/^\([A-Za-z0-9_.-]*\)==.*/\1 pinned/p' | sort -u | head -40
+          echo "PINNED_PACKAGE_COUNT=$(pip freeze | wc -l)" >> "$GITHUB_ENV"
+
+      - name: Suite - deterministic interprocess locking (fcntl.flock)
+        run: python -I -B operator_tool/test_lock_deterministic.py
+
+      - name: Suite - cross-process lock concurrency
+        run: python -I -B operator_tool/test_lock_concurrency.py
+
+      - name: Suite - publication fault injection
+        run: python -I -B operator_tool/test_publication_faults.py
+
+      - name: Suite - adversarial operator scenarios (real Chromium, fictional loopback portal)
+        run: python -I -B operator_tool/test_adversarial_mfa_operator.py
+
+      - name: Suite - Linux filesystem fixtures (permissions, symlinks, mtime precision)
+        run: python -I -B operator_tool/test_linux_fixtures.py
+
+      - name: Suite - qualified watcher interoperability (read-only reference)
+        run: python -I -B operator_tool/test_watcher_interop.py
+
+      - name: Suite - Stage B exclusive placement mechanism (stubbed git/docker)
+        run: python -I -B operator_tool/test_stage_b_exclusive_placement.py
+
+      - name: Build standalone ARM64 operator container (isolated context)
+        run: |
+          docker build -f operator_tool/Dockerfile -t tpo-operator-mfa:stage-c2-qual operator_tool/
+          test "$(docker image inspect tpo-operator-mfa:stage-c2-qual --format '{{.Architecture}}')" = "arm64"
+          test "$(docker image inspect tpo-operator-mfa:stage-c2-qual --format '{{.Os}}')" = "linux"
+
+      - name: Gate - container security boundaries (non-root, no ports, no socket, no secrets)
+        run: |
+          USER="$(docker image inspect tpo-operator-mfa:stage-c2-qual --format '{{.Config.User}}')"
+          ENTRY="$(docker image inspect tpo-operator-mfa:stage-c2-qual --format '{{json .Config.Entrypoint}}')"
+          PORTS="$(docker image inspect tpo-operator-mfa:stage-c2-qual --format '{{json .Config.ExposedPorts}}')"
+          ENVV="$(docker image inspect tpo-operator-mfa:stage-c2-qual --format '{{json .Config.Env}}')"
+          test "$USER" = "operator"
+          test "$PORTS" = "null" || test -z "$PORTS"
+          echo "$ENVV" | grep -Eiq '(secret|password|token|otp|credential)' && { echo "SECRET_ENV_LEAK"; exit 1; } || true
+          echo "CONTAINER_USER_OK=1 CONTAINER_PORTS_EMPTY=1"
+          echo "ENTRYPOINT_COUNT=$(echo "$ENTRY" | tr -cd ',' | wc -c)"
+
+      - name: Run - fictional browser suites inside the network-disabled container
+        run: |
+          docker run --rm --network none --entrypoint sh tpo-operator-mfa:stage-c2-qual -c \
+            "python /opt/operator_tool/test_lock_concurrency.py && \
+             python /opt/operator_tool/test_lock_deterministic.py && \
+             python /opt/operator_tool/test_adversarial_mfa_operator.py && \
+             { pgrep -f chromium >/dev/null 2>&1 && { echo ORPHAN_CHROMIUM; exit 1; } || echo CHROMIUM_CLEAN; }"
+
+      - name: Run - non-root identity proof inside the container
+        run: |
+          ID_OUT="$(docker run --rm --network none --entrypoint id tpo-operator-mfa:stage-c2-qual)"
+          echo "$ID_OUT" | grep -q 'uid=1000(operator)' || { echo "NOT_NON_ROOT"; exit 1; }
+          echo "CONTAINER_NON_ROOT_OK=1"
+
+      - name: Receipts - sanitized numerical summary (zero failures, zero skips, zero deferrals)
+        if: always()
+        run: |
+          {
+            echo ""
+            echo "### Qualification receipts (sanitized, numerical only)"
+            echo ""
+            echo "- pinned_package_count=${PINNED_PACKAGE_COUNT:-unknown}"
+            echo "- suites_dispatched=7"
+            echo "- container_checks=4"
+            echo "- verdict_policy=zero_failures_zero_skips_zero_deferrals"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Numerical receipts emitted to the job summary."

@@ -1,0 +1,5 @@
+# Stage C2 operator tool - explicit, reviewable dependency pins.
+# Only one third-party dependency: Playwright (pinned to the exact version
+# the qualified watcher application qualified against on ARM64, GitHub
+# Actions run 40216292332). Everything else is the Python 3.12 stdlib.
+playwright==1.63.0
