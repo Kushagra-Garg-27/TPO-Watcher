@@ -13,6 +13,7 @@ from pathlib import Path
 import socket
 import _socket
 import sqlite3
+import stat as stat_module
 import sys
 import tempfile
 import threading
@@ -111,6 +112,60 @@ def _mutation_path(path, dir_fd=None, *, readlink=None, platform=None):
     return path
 
 
+def _verify_chmod_descriptor(fd, args, *, readlink=None, fstat=None, stat=None, platform=None):
+    if type(fd) is not int or fd < 0:
+        _deny("invalid filesystem descriptor for chmod")
+    if len(args) != 3 or args[2] not in (None, -1) or type(args[1]) is not int:
+        _deny("invalid descriptor chmod audit signature")
+    effective_platform = sys.platform if platform is None else platform
+    if effective_platform != "linux":
+        _deny("unsupported descriptor filesystem mutation platform")
+
+    _fstat = os.fstat if fstat is None else fstat
+    _readlink = os.readlink if readlink is None else readlink
+    _stat = os.stat if stat is None else stat
+
+    try:
+        fd_stat = _fstat(fd)
+    except (OSError, ValueError, TypeError):
+        _deny("unresolvable filesystem descriptor")
+
+    if not (stat_module.S_ISREG(fd_stat.st_mode) or stat_module.S_ISDIR(fd_stat.st_mode)):
+        _deny("unsupported descriptor file type for chmod")
+
+    try:
+        link_val = _readlink(f"/proc/self/fd/{fd}")
+        link_str = os.fsdecode(link_val)
+    except (OSError, ValueError, TypeError):
+        _deny("unresolved filesystem descriptor link")
+
+    if not link_str or link_str.endswith(" (deleted)") or link_str.startswith(("pipe:", "socket:", "anon_inode:")):
+        _deny("unresolved or deleted descriptor target")
+
+    target_path = Path(link_str)
+    if not target_path.is_absolute():
+        _deny("unresolved relative descriptor target")
+
+    if not disposable_path(target_path):
+        _deny("filesystem descriptor target outside disposable test root")
+
+    try:
+        resolved_path = target_path.resolve()
+    except (OSError, ValueError, TypeError):
+        _deny("unresolved descriptor canonical path")
+
+    if not disposable_path(resolved_path):
+        _deny("filesystem descriptor resolved path outside disposable test root")
+
+    try:
+        path_stat = _stat(str(resolved_path))
+    except (OSError, ValueError, TypeError):
+        _deny("unresolvable descriptor target path stat")
+
+    if (fd_stat.st_dev, fd_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+        _deny("descriptor identity and target path mismatch")
+
+
 def _guard_os_open(native, *, readlink=None, platform=None):
     def guarded_open(path, flags, mode=0o777, *, dir_fd=None):
         if dir_fd is not None:
@@ -172,6 +227,9 @@ def _audit(event, args):
     elif event in ("sqlite3.load_extension", "sqlite3.enable_load_extension"):
         _deny("SQLite extensions disabled")
     elif event in ("os.remove", "os.rmdir", "os.mkdir", "os.chmod", "os.truncate", "os.utime", "os.chown"):
+        if event == "os.chmod" and isinstance(args[0], (int, bool)):
+            _verify_chmod_descriptor(args[0], args)
+            return
         index = {"os.remove": 1, "os.rmdir": 1, "os.mkdir": 2,
                  "os.chmod": 2, "os.utime": 3, "os.chown": 3}.get(event)
         descriptor = args[index] if index is not None else None

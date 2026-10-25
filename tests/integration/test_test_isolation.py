@@ -7,6 +7,7 @@ import socket
 import sqlite3
 import _sqlite3
 import subprocess
+import stat as stat_module
 import sys
 import urllib.request
 from unittest.mock import Mock
@@ -509,6 +510,154 @@ def test_linux_owned_descriptor_operations_and_safe_cleanup(tmp_path):
     nested.mkdir()
     (nested / "synthetic.txt").write_text("synthetic")
     shutil.rmtree(directory)
+
+
+def test_descriptor_chmod_permits_valid_linux_disposable_file(tmp_path):
+    target = tmp_path / "valid_chmod.tmp"
+    target.write_text("synthetic")
+    stat_val = target.stat()
+    fstat_mock = Mock(return_value=stat_val)
+    stat_mock = Mock(return_value=stat_val)
+    readlink_mock = Mock(return_value=str(target))
+    isolation._verify_chmod_descriptor(
+        10, (10, 0o600, None),
+        readlink=readlink_mock,
+        fstat=fstat_mock,
+        stat=stat_mock,
+        platform="linux",
+    )
+    readlink_mock.assert_called_once_with("/proc/self/fd/10")
+    fstat_mock.assert_called_once_with(10)
+    stat_mock.assert_called_once_with(str(target.resolve()))
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux native fchmod requires POSIX runtime")
+def test_linux_native_fchmod_on_disposable_file_succeeds(tmp_path):
+    assert hasattr(os, "fchmod")
+    target = tmp_path / "native_fchmod.tmp"
+    target.write_text("native fchmod content")
+    fd = os.open(str(target), os.O_RDWR)
+    try:
+        os.fchmod(fd, 0o600)
+        mode = stat_module.S_IMODE(os.stat(str(target)).st_mode)
+        assert mode == 0o600
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("case", [
+    "negative_fd",
+    "bool_fd",
+    "non_int_fd",
+    "bad_sig_dir_fd",
+    "bad_sig_len",
+    "bad_sig_mode",
+    "non_linux_platform",
+    "closed_descriptor",
+    "unsupported_type_fifo",
+    "unsupported_type_sock",
+    "deleted_target",
+    "pipe_target",
+    "socket_target",
+    "relative_target",
+    "outside_root",
+    "symlink_escaping",
+    "inode_mismatch",
+    "dev_mismatch",
+    "unstatable_target",
+])
+def test_descriptor_chmod_adversarial_rejections(case, tmp_path):
+    target = tmp_path / "safe.tmp"
+    target.write_text("safe")
+    real_stat = target.stat()
+
+    fd = 10
+    args = (10, 0o600, None)
+    platform = "linux"
+    readlink = Mock(return_value=str(target))
+    fstat = Mock(return_value=real_stat)
+    stat_func = Mock(return_value=real_stat)
+
+    if case == "negative_fd":
+        fd = -1
+        args = (-1, 0o600, None)
+    elif case == "bool_fd":
+        fd = True
+        args = (True, 0o600, None)
+    elif case == "non_int_fd":
+        fd = "10"
+        args = ("10", 0o600, None)
+    elif case == "bad_sig_dir_fd":
+        args = (10, 0o600, 5)
+    elif case == "bad_sig_len":
+        args = (10, 0o600)
+    elif case == "bad_sig_mode":
+        args = (10, "0600", None)
+    elif case == "non_linux_platform":
+        platform = "win32"
+    elif case == "closed_descriptor":
+        fstat.side_effect = OSError(9, "Bad file descriptor")
+    elif case == "unsupported_type_fifo":
+        m = Mock()
+        m.st_mode = stat_module.S_IFIFO | 0o600
+        m.st_dev, m.st_ino = real_stat.st_dev, real_stat.st_ino
+        fstat.return_value = m
+    elif case == "unsupported_type_sock":
+        m = Mock()
+        m.st_mode = stat_module.S_IFSOCK | 0o600
+        m.st_dev, m.st_ino = real_stat.st_dev, real_stat.st_ino
+        fstat.return_value = m
+    elif case == "deleted_target":
+        readlink.return_value = str(target) + " (deleted)"
+    elif case == "pipe_target":
+        readlink.return_value = "pipe:[12345]"
+    elif case == "socket_target":
+        readlink.return_value = "socket:[12345]"
+    elif case == "relative_target":
+        readlink.return_value = "relative_name.tmp"
+    elif case == "outside_root":
+        readlink.return_value = str(isolation.REPOSITORY.parent / "escape.tmp")
+    elif case == "symlink_escaping":
+        outside_path = isolation.REPOSITORY.parent / "escape.tmp"
+        readlink.return_value = str(outside_path)
+    elif case == "inode_mismatch":
+        m = Mock()
+        m.st_mode = real_stat.st_mode
+        m.st_dev = real_stat.st_dev
+        m.st_ino = real_stat.st_ino + 1000
+        stat_func.return_value = m
+    elif case == "dev_mismatch":
+        m = Mock()
+        m.st_mode = real_stat.st_mode
+        m.st_dev = real_stat.st_dev + 1
+        m.st_ino = real_stat.st_ino
+        stat_func.return_value = m
+    elif case == "unstatable_target":
+        stat_func.side_effect = OSError("stat failed")
+
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        isolation._verify_chmod_descriptor(
+            fd, args,
+            readlink=readlink,
+            fstat=fstat,
+            stat=stat_func,
+            platform=platform,
+        )
+
+
+def test_audit_chmod_routes_integer_descriptor_and_preserves_path_checks(tmp_path):
+    safe_path = str(tmp_path / "safe_audit.tmp")
+    Path(safe_path).write_text("safe")
+    isolation._audit("os.chmod", (safe_path, 0o600, None))
+
+    forbidden_path = str(isolation.REPOSITORY / "secret.key")
+    with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+        isolation._audit("os.chmod", (forbidden_path, 0o600, None))
+
+    if sys.platform != "linux":
+        with isolation.expected_violation(), pytest.raises(isolation.IsolationViolation):
+            isolation._audit("os.chmod", (10, 0o600, None))
+
 def test_guarded_child_installs_before_app_and_has_distinct_pid():
     with isolation.start_test_child("client") as child:
         assert child.ready["guard_installed"] is True
