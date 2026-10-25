@@ -5,8 +5,20 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 from app.config import settings
-from app.auth.manager import AuthManager
-from app.tpo.client import TPOClient, AuthenticationError
+from app.auth.manager import (
+    AuthManager,
+    AuthState,
+    AuthenticationError,
+    AuthStateError,
+    MFAEnrollmentRequiredError,
+    MFAVerificationRequiredError,
+    CredentialsRejectedError,
+    AuthenticationTimeoutError,
+    UnknownAuthenticationStateError,
+    ReauthenticationRequiredError,
+    get_state_file_path,
+)
+from app.tpo.client import TPOClient
 from app.database.repository import DatabaseRepository
 from app.monitoring.detector import CompanyDetector
 from app.monitoring.scheduler import TimezoneScheduler
@@ -155,6 +167,36 @@ class PlacementWatcher:
                 logger.error("Notification %s remains pending (%s).", notif["id"], type(exc).__name__)
         return complete
 
+    def is_mfa_paused(self) -> bool:
+        """Returns True if automated checks are paused awaiting MFA resolution.
+
+        Auto-unpauses if a newer session state file has been placed since the pause."""
+        if not hasattr(self.db, "get_system_state"):
+            return False
+        if self.db.get_system_state("mfa_pending") != "true":
+            return False
+
+        paused_mtime = self.db.get_system_state("mfa_paused_state_mtime")
+        state_file = self.auth.state_file if (self.auth and hasattr(self.auth, "state_file")) else get_state_file_path()
+        if os.path.exists(state_file) and paused_mtime:
+            try:
+                curr_mtime = os.path.getmtime(state_file)
+                if curr_mtime > float(paused_mtime):
+                    self.db.set_system_state("mfa_pending", "false")
+                    self.db.set_system_state("auth_status", "SESSION_REFRESHED")
+                    logger.info("Session state file was refreshed; clearing MFA pause.")
+                    return False
+            except (OSError, ValueError):
+                pass
+        return True
+
+    def reset_auth_pause(self):
+        """Explicit authorized reset of the MFA pause state."""
+        if hasattr(self.db, "set_system_state"):
+            self.db.set_system_state("mfa_pending", "false")
+            self.db.set_system_state("auth_status", "RESET_REQUESTED")
+        logger.info("MFA pause state explicitly reset.")
+
     async def check_once(self):
         """Performs a single check iteration with automatic re-authentication recovery."""
         from app.monitoring.runtime_supervisor import current_runtime
@@ -170,15 +212,66 @@ class PlacementWatcher:
             except Exception as exc:
                 logger.warning("Local v2 observation requires recovery (%s)", type(exc).__name__)
                 return False
+
+        # Guard: check if automated polling is paused awaiting human MFA resolution
+        if self.is_mfa_paused():
+            logger.warning("Scheduled check skipped: MFA authentication remains pending human action.")
+            self.record_heartbeat_failure()
+            send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
+            return False
+
         max_attempts = 2
         for attempt in range(max_attempts):
             try:
                 logger.info(f"Starting check iteration (attempt {attempt + 1})...")
                 
                 # 1. Ensure authentication
-                is_auth = await self.auth.is_authenticated()
-                logger.info(f"Authentication status: {'Authenticated' if is_auth else 'Session unauthenticated / expired'}")
-                page = await self.auth.get_valid_page()
+                try:
+                    is_auth = await self.auth.is_authenticated()
+                    logger.info(f"Authentication status: {'Authenticated' if is_auth else 'Session unauthenticated / expired'}")
+                    page = await self.auth.get_valid_page()
+                except (MFAEnrollmentRequiredError, MFAVerificationRequiredError) as exc:
+                    logger.warning("Source check halted: %s. Pausing automated login attempts.", exc.state.value)
+                    if hasattr(self.db, "set_system_state"):
+                        self.db.set_system_state("auth_status", exc.state.value)
+                        self.db.set_system_state("mfa_pending", "true")
+                        state_path = self.auth.state_file if (self.auth and hasattr(self.auth, "state_file")) else get_state_file_path()
+                        current_mtime = str(os.path.getmtime(state_path)) if os.path.exists(state_path) else "0"
+                        self.db.set_system_state("mfa_paused_state_mtime", current_mtime)
+                    if self.auth and hasattr(self.auth, "stop"):
+                        await self.auth.stop()
+                    self.record_heartbeat_failure()
+                    send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
+                    return False
+                except CredentialsRejectedError as exc:
+                    logger.error("Source check halted: Credentials rejected by portal.")
+                    if hasattr(self.db, "set_system_state"):
+                        self.db.set_system_state("auth_status", exc.state.value)
+                    if self.auth and hasattr(self.auth, "stop"):
+                        await self.auth.stop()
+                    self.record_heartbeat_failure()
+                    send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
+                    return False
+                except AuthenticationTimeoutError as exc:
+                    logger.error("Source check halted: Authentication timed out.")
+                    if hasattr(self.db, "set_system_state"):
+                        self.db.set_system_state("auth_status", exc.state.value)
+                    if self.auth and hasattr(self.auth, "stop"):
+                        await self.auth.stop()
+                    self.record_heartbeat_failure()
+                    send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
+                    return False
+                except UnknownAuthenticationStateError as exc:
+                    logger.warning("Source check halted: Unrecognized authentication state.")
+                    if hasattr(self.db, "set_system_state"):
+                        self.db.set_system_state("auth_status", exc.state.value)
+                    if self.auth and hasattr(self.auth, "stop"):
+                        await self.auth.stop()
+                    self.record_heartbeat_failure()
+                    send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
+                    return False
+                except ReauthenticationRequiredError as exc:
+                    raise AuthenticationError("Session expired; re-authentication required") from exc
                 
                 # 2. Fetch data
                 logger.info("API request started: Fetching companies from TPO API...")
@@ -187,7 +280,8 @@ class PlacementWatcher:
                 logger.info(f"API request succeeded. Retrieved {len(companies)} companies.")
                 # F12: surface accepted-but-empty observations instead of only
                 # a green heartbeat.
-                self.db.set_system_state("last_observation_company_count", str(len(companies)))
+                if hasattr(self.db, "set_system_state"):
+                    self.db.set_system_state("last_observation_company_count", str(len(companies)))
                 
                 # 3. Process data (Detects and adds to pending_notifications)
                 result = self.detector.process_fetched_companies(companies)
@@ -204,8 +298,9 @@ class PlacementWatcher:
                 pending_count = len(self.db.get_pending_notifications())
                 logger.info(f"Pending admin notifications in queue: {pending_count}")
                 notifications_complete = await self._process_notifications()
-                self.db.set_system_state(
-                    "last_admin_drain_complete", "true" if notifications_complete else "false")
+                if hasattr(self.db, "set_system_state"):
+                    self.db.set_system_state(
+                        "last_admin_drain_complete", "true" if notifications_complete else "false")
 
                 # 5. Process student subscriber deliveries via recoverable lease worker
                 delivered_subs = await self.delivery_worker.process_batch_once()
@@ -219,6 +314,9 @@ class PlacementWatcher:
                     send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
                     return False
                 logger.info("Check iteration complete.")
+                if hasattr(self.db, "set_system_state"):
+                    self.db.set_system_state("auth_status", AuthState.AUTHENTICATED.value)
+                    self.db.set_system_state("mfa_pending", "false")
                 self.record_heartbeat_success()
                 send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=True)
                 return True
@@ -227,12 +325,17 @@ class PlacementWatcher:
                 logger.warning("Authentication failure detected during check.")
                 if attempt < max_attempts - 1:
                     logger.info("Recovering session: clearing expired state and re-authenticating...")
-                    await self.auth.stop()
-                    if os.path.exists("playwright_state.json"):
-                        try:
-                            os.remove("playwright_state.json")
-                        except Exception:
-                            pass
+                    if self.auth and hasattr(self.auth, "stop"):
+                        await self.auth.stop()
+                    if self.auth and hasattr(self.auth, "clear_session_state"):
+                        self.auth.clear_session_state()
+                    else:
+                        state_path = getattr(self.auth, "state_file", get_state_file_path())
+                        if os.path.exists(state_path):
+                            try:
+                                os.remove(state_path)
+                            except Exception:
+                                pass
                     self.auth = AuthManager()
                     logger.info("Retrying API request with fresh authenticated session...")
                     continue
@@ -249,6 +352,7 @@ class PlacementWatcher:
         self.record_heartbeat_failure()
         send_healthcheck_ping(settings.HEALTHCHECK_WATCHER_URL, success=False)
         return False
+
 
     def record_heartbeat_success(self):
         """Records UTC timestamp of successful scheduled watcher execution."""

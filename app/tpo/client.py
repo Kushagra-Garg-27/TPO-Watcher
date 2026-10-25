@@ -75,8 +75,7 @@ def _source_rejection_category(body):
     return "invalid_company_identity"
 
 
-class AuthenticationError(Exception):
-    pass
+from app.auth.manager import AuthenticationError
 
 class TPOClient:
     def __init__(self, context: BrowserContext, page: Optional[Page] = None, *, listing_contract=None, clock=None):

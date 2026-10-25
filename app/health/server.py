@@ -162,6 +162,8 @@ def health_details(request: Request) -> Dict[str, Any]:
             except (TypeError, ValueError):
                 detail["last_observation_company_count"] = None
             detail["last_admin_drain_complete"] = state("last_admin_drain_complete")
+            detail["auth_status"] = state("auth_status") or "unknown"
+            detail["mfa_pending"] = state("mfa_pending") == "true"
 
             detail["deliveries"] = {
                 row["status"]: row["cnt"]
