@@ -18,8 +18,9 @@ def main():
     for line in Path("/app/requirements.txt").read_text().splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
-            name, version = line.split("==")
-            assert md.version(name) == version
+            name, version = line.split("==", 1)
+            distribution_name = name.split("[", 1)[0]
+            assert md.version(distribution_name) == version
     # Re-run all 21 exact candidate regressions in the image's real interpreter,
     # including shared-console/Uvicorn sinks and fictional overlapping credentials.
     result = subprocess.run([sys.executable, "-I", "-B", "/qualification/run_suite.py", "/app", "privacy"],

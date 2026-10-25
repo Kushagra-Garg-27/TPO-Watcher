@@ -82,8 +82,9 @@ jobs:
           for line in (Path(os.environ['RUNNER_TEMP'])/'native/requirements.txt').read_text().splitlines():
               line=line.strip()
               if not line or line.startswith('#'): continue
-              name,version=line.split('==')
-              assert md.version(name) == version, 'dependency_pin_mismatch'
+              name,version=line.split('==', 1)
+              distribution_name = name.split('[', 1)[0]
+              assert md.version(distribution_name) == version, 'dependency_pin_mismatch'
               print(name + '==' + version)
           PY
 
