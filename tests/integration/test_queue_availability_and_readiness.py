@@ -25,11 +25,22 @@ async def test_f10_queue_drains_while_source_is_unavailable(audit_repo, monkeypa
     notifier = FakeNotifier()
     watcher, _ = safe_watcher(audit_repo, monkeypatch, notifier, [[company()]])
 
-    async def failing_fetch(self=None, *args, **kwargs):
-        raise RuntimeError("fictional source outage")
+    fetch_attempts = []
 
-    monkeypatch.setattr(watcher_module, "TPOClient", failing_fetch)
+    class FailingClient:
+        def __init__(self, *args):
+            pass
+
+        async def fetch_companies(self):
+            fetch_attempts.append(1)
+            raise RuntimeError("fictional source outage")
+
+    monkeypatch.setattr(watcher_module, "TPOClient", FailingClient)
     assert await watcher.check_once() is False
+    assert fetch_attempts == [1]
+    assert notifier.student_calls == 0
+    assert delivery_row(audit_repo)["status"] == "PENDING"
+    assert audit_repo.get_system_state("consecutive_watcher_failures") == "1"
     # The independent drain tick still delivers the queued obligation.
     assert await watcher.drain_once() == 1
     assert notifier.student_calls == 1

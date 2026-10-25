@@ -12,7 +12,7 @@ _SENSITIVE_SETTINGS = (
 _URL = re.compile(r"(?:https?|wss?)://[^\s<>\"']+", re.IGNORECASE)
 _EMAIL = re.compile(r"[^\s<>\"'@=]+@[^\s<>\"'@,;]+")
 _PRIVATE_HEADER = re.compile(
-    r"\b(?:authorization|cookie|set-cookie)\s*[:=]\s*[^\r\n]*", re.IGNORECASE)
+    r"[\"']?\b(?:authorization|cookie|set-cookie)[\"']?\s*[:=]\s*[^\r\n]*", re.IGNORECASE)
 _PRIVATE_FIELD = re.compile(
     r"[\"']?\b(?:password|secret(?:_key)?|(?:access[_-]?|refresh[_-]?)?token)"
     r"[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)", re.IGNORECASE)
@@ -41,11 +41,17 @@ class PrivacyFormatter(logging.Formatter):
             message = safe.getMessage()
         except Exception:
             message = "log_message_unavailable"
+        # Withhold, rather than truncate, to avoid exposing a partial credential.
+        # This also bounds the work of pattern redaction on untrusted text.
+        if len(message) > 4096:
+            message = "log_message_oversized"
         for name in _SENSITIVE_SETTINGS:
             value = getattr(settings, name, None)
             if isinstance(value, str) and value:
                 message = message.replace(value, "[redacted]")
         for pattern in (_URL, _EMAIL, _PRIVATE_HEADER, _PRIVATE_FIELD):
+            if pattern is _EMAIL and "@" not in message:
+                continue
             message = pattern.sub("[redacted]", message)
         safe.msg, safe.args = message, ()
         # A previous handler may already have cached unredacted exception text.

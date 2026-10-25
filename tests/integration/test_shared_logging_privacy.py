@@ -45,12 +45,25 @@ def console(monkeypatch):
     ('payload {"access_token": "fictional-access-secret"}', "fictional-access-secret"),
     ("Authorization: Bearer fictional-bearer-secret", "fictional-bearer-secret"),
     ("Cookie: sid=fictional-cookie-secret; refresh=fictional-refresh-secret", "fictional-cookie-secret"),
+    ("headers={'Authorization': 'Bearer fictional-dict-bearer'}", "fictional-dict-bearer"),
+    ('headers={"Cookie": "sid=fictional-dict-cookie"}', "fictional-dict-cookie"),
 ])
 def test_shared_sink_redacts_sensitive_values_from_nested_logger(console, message, private):
     logging.getLogger("app.third_party_boundary").warning(message)
     output = console.getvalue()
     assert private not in output
     assert "[redacted]" in output
+
+
+def test_oversized_message_is_withheld_before_pattern_redaction(console):
+    # Withhold the whole value: truncating first could expose part of a secret.
+    message = "x" * 4090 + "fictional-provider-password-82" + "y" * 4090
+    logging.getLogger("app.provider").error(message)
+    output = console.getvalue()
+    assert "log_message_oversized" in output
+    assert "x" * 100 not in output
+    assert "fictional-provider" not in output
+    assert len(output) < 200
 
 
 def test_shared_sink_suppresses_exception_arguments_and_traceback_text(console):
