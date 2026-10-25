@@ -421,6 +421,7 @@ async def test_watcher_resumes_after_session_file_refreshed(tmp_path):
 
     watcher = PlacementWatcher(db=repo)
     watcher.auth.state_file = str(state_file)
+    watcher.auth.start = AsyncMock()
     watcher.auth.is_authenticated = AsyncMock(return_value=True)
     watcher.auth.get_valid_page = AsyncMock(return_value=FictionalPage())
     watcher.auth.stop = AsyncMock()
@@ -607,4 +608,293 @@ async def test_has_authenticated_dom_markers_requires_specific_post_login_elemen
     )
     # Must return False because specific authenticated elements (dashboard/logout) are absent
     assert await manager._has_authenticated_dom_markers() is False
+
+
+# ==============================================================================
+# 10. Security Preflight & Qualification Regressions
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_save_storage_state_safe_preserves_existing_state_if_write_fails(tmp_path):
+    """
+    Phase 2: Atomic replacement must preserve the existing session file if storage_state fails.
+    """
+    state_file = tmp_path / "playwright_state.json"
+    original_bytes = b'{"cookies":[{"name":"auth","value":"previous-good-session"}]}'
+    state_file.write_bytes(original_bytes)
+
+    manager = AuthManager()
+    manager.state_file = str(state_file)
+
+    mock_context = MagicMock()
+    async def failing_storage_state(path=None):
+        raise IOError("Disk write simulated failure")
+    mock_context.storage_state = failing_storage_state
+    manager.context = mock_context
+
+    with pytest.raises(IOError):
+        await manager.save_storage_state_safe()
+
+    # Original session file must be 100% intact
+    assert state_file.exists()
+    assert state_file.read_bytes() == original_bytes
+    # No dangling .tmp files in directory
+    tmp_files = list(tmp_path.glob("*.tmp*"))
+    assert len(tmp_files) == 0
+
+
+@pytest.mark.asyncio
+async def test_save_storage_state_safe_enforces_private_parent_directory_even_when_existing(tmp_path):
+    """
+    Phase 2: Parent directory must be set to 0700 private permissions even if it already existed.
+    """
+    parent_dir = tmp_path / "existing_dir"
+    parent_dir.mkdir(mode=0o777)
+    state_file = parent_dir / "playwright_state.json"
+
+    manager = AuthManager()
+    manager.state_file = str(state_file)
+
+    mock_context = MagicMock()
+    async def fake_storage_state(path=None):
+        if path:
+            with open(path, "w") as f:
+                f.write('{"cookies":[]}')
+        return {"cookies": []}
+    mock_context.storage_state = fake_storage_state
+    manager.context = mock_context
+
+    with patch("os.chmod") as mock_chmod:
+        await manager.save_storage_state_safe()
+        # Verify chmod 0o700 was called for parent_dir
+        chmod_calls = [call[0] for call in mock_chmod.call_args_list]
+        dir_calls = [c for c in chmod_calls if c[0] == str(parent_dir) and c[1] == 0o700]
+        assert len(dir_calls) >= 1
+
+
+@pytest.mark.asyncio
+async def test_is_authenticated_restores_page_from_active_context():
+    """
+    Phase 3: When context is active but page is None, is_authenticated() restores page from context.
+    """
+    manager = AuthManager()
+    manager.page = None
+    mock_context = MagicMock()
+    mock_page = FictionalPage(url="https://tpo.vierp.in/company-dashboard", selectors={
+        "a[href='/company-dashboard']": FictionalLocator(count=1),
+        "logout": FictionalLocator(count=1),
+    })
+    async def mock_new_page():
+        return mock_page
+    mock_context.new_page = mock_new_page
+    manager.context = mock_context
+
+    result = await manager.is_authenticated()
+    assert manager.page is mock_page
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_is_authenticated_returns_false_safely_when_context_is_none():
+    """
+    Phase 3: When context is None, is_authenticated() returns False without launching unrequested subprocesses.
+    """
+    manager = AuthManager()
+    manager.page = None
+    manager.context = None
+
+    result = await manager.is_authenticated()
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_session_refresh_restores_context_and_preserves_pause_if_invalid(tmp_path):
+    """
+    Phase 3: When session is refreshed during MFA pause, the watcher must restore
+    browser context, validate via is_authenticated(), and keep pause if session is invalid.
+    """
+    db_path = str(tmp_path / "test_mfa_restore.sqlite")
+    state_file = tmp_path / "playwright_state.json"
+    state_file.write_text('{"cookies":[]}')
+
+    repo = DatabaseRepository(db_path)
+    repo.set_baseline_initialized()
+    repo.set_system_state("mfa_pending", "true")
+    repo.set_system_state("auth_status", AuthState.MFA_VERIFICATION_REQUIRED.value)
+    # Record paused mtime as in the past
+    past_mtime = time.time() - 200
+    repo.set_system_state("mfa_paused_state_mtime", str(past_mtime))
+
+    # Touch file to simulate operator dropping a new session file
+    os.utime(str(state_file), None)
+
+    watcher = PlacementWatcher(db=repo)
+    # Simulate watcher having no active browser (stopped upon pause)
+    watcher.auth.page = None
+    watcher.auth.context = None
+    watcher.auth.state_file = str(state_file)
+
+    # Mock AuthManager start to create a page that fails authentication (e.g. invalid session)
+    async def mock_start():
+        watcher.auth.context = MagicMock()
+        watcher.auth.page = FictionalPage(url="https://tpo.vierp.in/login", selectors={
+            "input[type='password']": FictionalLocator(count=1)
+        })
+    watcher.auth.start = mock_start
+    watcher.auth.login = AsyncMock()
+    watcher.auth.stop = AsyncMock()
+
+    result = await watcher.check_once()
+    assert result is False
+
+    # login() with credentials must NEVER be called
+    assert watcher.auth.login.await_count == 0
+    # mfa_pending must remain true
+    assert repo.get_system_state("mfa_pending") == "true"
+
+
+@pytest.mark.asyncio
+async def test_session_refresh_restores_context_and_clears_pause_if_valid(tmp_path):
+    """
+    Phase 3: When session is refreshed during MFA pause and validation succeeds,
+    watcher clears MFA pause and transitions to AUTHENTICATED without re-entering credentials.
+    """
+    db_path = str(tmp_path / "test_mfa_valid.sqlite")
+    state_file = tmp_path / "playwright_state.json"
+    state_file.write_text('{"cookies":[{"name":"auth","value":"valid"}]}')
+
+    repo = DatabaseRepository(db_path)
+    repo.set_baseline_initialized()
+    repo.set_system_state("mfa_pending", "true")
+    repo.set_system_state("auth_status", AuthState.MFA_VERIFICATION_REQUIRED.value)
+    past_mtime = time.time() - 200
+    repo.set_system_state("mfa_paused_state_mtime", str(past_mtime))
+
+    os.utime(str(state_file), None)
+
+    watcher = PlacementWatcher(db=repo)
+    watcher.auth.page = None
+    watcher.auth.context = None
+    watcher.auth.state_file = str(state_file)
+
+    async def mock_start():
+        watcher.auth.context = MagicMock()
+        watcher.auth.page = FictionalPage(url="https://tpo.vierp.in/home", selectors={
+            "a[href='/company-dashboard']": FictionalLocator(count=1),
+            "logout": FictionalLocator(count=1),
+        })
+    watcher.auth.start = mock_start
+    watcher.auth.login = AsyncMock()
+    watcher.delivery_worker.process_batch_once = AsyncMock(return_value=0)
+    watcher._process_notifications = AsyncMock(return_value=None)
+
+    with patch("app.monitoring.watcher.TPOClient") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.fetch_companies = AsyncMock(return_value=[])
+        mock_client_cls.return_value = mock_client
+
+        result = await watcher.check_once()
+        assert result is True
+
+    # login() with credentials must NEVER be called
+    assert watcher.auth.login.await_count == 0
+    # mfa_pending must be cleared
+    assert repo.get_system_state("mfa_pending") == "false"
+    assert repo.get_system_state("auth_status") == AuthState.AUTHENTICATED.value
+
+
+@pytest.mark.asyncio
+async def test_session_refresh_interrupted_validation_preserves_pause(tmp_path):
+    """
+    Phase 3: If an exception occurs while restoring/validating a refreshed session,
+    watcher handles it gracefully and keeps MFA pause engaged.
+    """
+    db_path = str(tmp_path / "test_mfa_interrupted.sqlite")
+    state_file = tmp_path / "playwright_state.json"
+    state_file.write_text('{"cookies":[]}')
+
+    repo = DatabaseRepository(db_path)
+    repo.set_baseline_initialized()
+    repo.set_system_state("mfa_pending", "true")
+    repo.set_system_state("auth_status", AuthState.MFA_VERIFICATION_REQUIRED.value)
+    past_mtime = time.time() - 200
+    repo.set_system_state("mfa_paused_state_mtime", str(past_mtime))
+
+    os.utime(str(state_file), None)
+
+    watcher = PlacementWatcher(db=repo)
+    watcher.auth.page = None
+    watcher.auth.context = None
+    watcher.auth.state_file = str(state_file)
+
+    async def failing_start():
+        raise RuntimeError("Simulated browser launch timeout / network disruption")
+    watcher.auth.start = failing_start
+    watcher.auth.login = AsyncMock()
+    watcher.auth.stop = AsyncMock()
+
+    result = await watcher.check_once()
+    assert result is False
+    assert watcher.auth.login.await_count == 0
+    assert repo.get_system_state("mfa_pending") == "true"
+
+
+@pytest.mark.asyncio
+async def test_repeated_cycles_during_mfa_pause_remain_bounded_and_safe(tmp_path):
+    """
+    Phase 3: Multiple consecutive check cycles during MFA pause without refreshed files
+    safely skip polling without side effects, credentials leaks, or unhandled errors.
+    """
+    db_path = str(tmp_path / "test_mfa_bounded.sqlite")
+    state_file = tmp_path / "playwright_state.json"
+    state_file.write_text('{"cookies":[]}')
+
+    repo = DatabaseRepository(db_path)
+    repo.set_baseline_initialized()
+    repo.set_system_state("mfa_pending", "true")
+    repo.set_system_state("auth_status", AuthState.MFA_VERIFICATION_REQUIRED.value)
+    curr_mtime = os.path.getmtime(str(state_file))
+    repo.set_system_state("mfa_paused_state_mtime", str(curr_mtime))
+
+    watcher = PlacementWatcher(db=repo)
+    watcher.auth.login = AsyncMock()
+    watcher.auth.start = AsyncMock()
+
+    for _ in range(5):
+        result = await watcher.check_once()
+        assert result is False
+        assert watcher.auth.login.await_count == 0
+        assert watcher.auth.start.await_count == 0
+        assert repo.get_system_state("mfa_pending") == "true"
+
+
+@pytest.mark.asyncio
+async def test_reset_auth_pause_does_not_grant_authentication_by_itself(tmp_path):
+    """
+    Phase 3: Calling reset_auth_pause() unpauses the state machine flag,
+    but does NOT grant authentication; on the next check, full authentication is required.
+    """
+    db_path = str(tmp_path / "test_mfa_reset.sqlite")
+    repo = DatabaseRepository(db_path)
+    repo.set_baseline_initialized()
+    repo.set_system_state("mfa_pending", "true")
+    repo.set_system_state("auth_status", AuthState.MFA_VERIFICATION_REQUIRED.value)
+
+    watcher = PlacementWatcher(db=repo)
+    watcher.reset_auth_pause()
+
+    # mfa_pending flag is cleared and auth_status reset
+    assert repo.get_system_state("mfa_pending") == "false"
+    assert repo.get_system_state("auth_status") == "RESET_REQUESTED"
+
+    # But watcher.check_once() must still require real authentication via get_valid_page()
+    watcher.auth.get_valid_page = AsyncMock(side_effect=MFAEnrollmentRequiredError())
+    watcher.auth.stop = AsyncMock()
+
+    result = await watcher.check_once()
+    assert result is False
+    # Re-enters MFA pause
+    assert repo.get_system_state("mfa_pending") == "true"
+    assert repo.get_system_state("auth_status") == AuthState.MFA_ENROLLMENT_REQUIRED.value
+
 

@@ -221,6 +221,9 @@ class PlacementWatcher:
                 
                 is_valid = False
                 try:
+                    if self.auth and (not getattr(self.auth, "page", None) or self.auth.page.is_closed()):
+                        if hasattr(self.auth, "start"):
+                            await self.auth.start()
                     is_valid = await self.auth.is_authenticated()
                 except Exception:
                     is_valid = False

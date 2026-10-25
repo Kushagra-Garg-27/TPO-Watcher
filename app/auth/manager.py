@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import tempfile
 import logging
 from enum import Enum
 from typing import Optional, Dict, Tuple
@@ -349,9 +350,13 @@ class AuthManager:
         """
         Checks if current session is authenticated by verifying exact URL path,
         valid origin, and authenticated DOM markers without password/MFA fields.
+        Initializes or restores browser context and page if not present.
         """
         if not self.page or self.page.is_closed():
-            return False
+            if self.context:
+                self.page = await self.context.new_page()
+            else:
+                return False
             
         valid_origin, path = self._parse_and_validate_url(self.page.url)
         if valid_origin and path in ("/home", "/company-dashboard"):
@@ -379,22 +384,41 @@ class AuthManager:
         """
         Saves Playwright storage state using atomic replacement and protected file permissions.
         Ensures restrictive parent directory permissions (0700) and file permissions (0600)
-        without symlink vulnerability or world-readable write windows.
+        before sensitive data is written, preventing world-readable write windows or symlink attacks.
         """
         if not self.context:
             return
         state_dir = os.path.dirname(os.path.abspath(self.state_file))
-        if state_dir and not os.path.exists(state_dir):
+        if state_dir:
             os.makedirs(state_dir, mode=0o700, exist_ok=True)
-            
-        tmp_file = f"{self.state_file}.tmp.{os.getpid()}.{int(time.time() * 1000)}"
-        try:
-            await self.context.storage_state(path=tmp_file)
             if hasattr(os, "chmod"):
+                try:
+                    os.chmod(state_dir, 0o700)
+                except OSError:
+                    pass
+
+        # Create temporary file with restrictive permissions (0600) before any data is written
+        fd, tmp_file = tempfile.mkstemp(prefix="state_", suffix=".tmp", dir=state_dir)
+        try:
+            if hasattr(os, "fchmod"):
+                try:
+                    os.fchmod(fd, 0o600)
+                except OSError:
+                    pass
+            elif hasattr(os, "chmod"):
                 try:
                     os.chmod(tmp_file, 0o600)
                 except OSError:
                     pass
+            os.close(fd)
+
+            try:
+                await self.context.storage_state(path=tmp_file)
+            except TypeError:
+                state_data = await self.context.storage_state()
+                with open(tmp_file, "w", encoding="utf-8") as f:
+                    json.dump(state_data, f)
+
             os.replace(tmp_file, self.state_file)
             if hasattr(os, "chmod"):
                 try:
@@ -404,7 +428,7 @@ class AuthManager:
             logger.info("Session state saved to storage at %s.", self.state_file)
         except Exception as e:
             logger.error("Failed to save session state safely (%s).", type(e).__name__)
-            if os.path.exists(tmp_file):
+            if tmp_file and os.path.exists(tmp_file):
                 try:
                     os.remove(tmp_file)
                 except Exception:
