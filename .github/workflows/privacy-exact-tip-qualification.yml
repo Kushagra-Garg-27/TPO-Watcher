@@ -1,0 +1,207 @@
+name: Privacy exact-tip qualification (native ARM64 and runtime image)
+
+# One explicitly approved push to this dedicated branch triggers one run.
+# No pull_request, workflow_dispatch, schedule, workflow_run or production trigger.
+'on':
+  push:
+    branches: [codex/privacy-exact-tip-qualification-20261025]
+
+permissions:
+  contents: read
+concurrency:
+  group: privacy-exact-tip-e761f8d
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      CANDIDATE: e761f8d47d8f3827c685bcecd7aab6adf5afe378
+      EXPECTED_TREE: 33ae3a29c52be62a265086831fb30b9c52fcb1f1
+      PYTHONDONTWRITEBYTECODE: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    steps:
+      - name: Enforce one attempt on genuine native ARM64
+        env:
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          test "$ATTEMPT" = 1
+          test "$(uname -m)" = aarch64
+          uname -a
+          cat /etc/os-release
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable source and test-only qualification overlay
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "$CANDIDATE^{tree}")" = "$EXPECTED_TREE"
+          git merge-base --is-ancestor 053b152b37d8aea8d5b4c74606765cdc73565136 "$CANDIDATE"
+          git merge-base --is-ancestor "$CANDIDATE" HEAD
+          git diff --exit-code "$CANDIDATE" HEAD -- app tests frontend requirements.txt Dockerfile .dockerignore docker-compose.yml
+          python3 - <<'PY'
+          import subprocess
+          allowed = {
+              '.github/workflows/privacy-exact-tip-qualification.yml',
+              'qualification/privacy_exact_tip/run_suite.py',
+              'qualification/privacy_exact_tip/container_smoke.py',
+              'qualification/privacy_exact_tip/test_receipt_gate.py',
+              'qualification/privacy_exact_tip/test_legacy_schema_migration.py',
+              'reports/TPO_WATCHER_PRIVACY_EXACT_TIP_QUALIFICATION_PLAN.md',
+              'reports/TPO_WATCHER_PRODUCTION_BASE_REMEDIATION_CONVERGENCE_2026_10_25.md',
+          }
+          paths = subprocess.check_output(['git','diff','--name-only','e761f8d47d8f3827c685bcecd7aab6adf5afe378','HEAD'], text=True).splitlines()
+          assert set(paths) <= allowed, 'qualification_scope_drift'
+          PY
+          test "$(git hash-object qualification/privacy_exact_tip/test_legacy_schema_migration.py)" = 98188a60ffa7e71cb163e5987be55b9ce9702914
+          git worktree add --detach "$RUNNER_TEMP/native" "$CANDIDATE"
+          git worktree add --detach "$RUNNER_TEMP/appsrc" "$CANDIDATE"
+          test -z "$(git -C "$RUNNER_TEMP/appsrc" status --porcelain)"
+          cp qualification/privacy_exact_tip/test_legacy_schema_migration.py "$RUNNER_TEMP/native/tests/integration/"
+          mkdir -p "$RUNNER_TEMP/evidence"
+          printf 'QUALIFICATION_HEAD=%s\nCANDIDATE=%s\nTREE=%s\n' "$(git rev-parse HEAD)" "$CANDIDATE" "$EXPECTED_TREE"
+
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: '3.12'
+
+      - name: Install and verify the unchanged pinned requirements
+        run: |
+          set -euo pipefail
+          python -m pip install -r "$RUNNER_TEMP/native/requirements.txt"
+          python - <<'PY'
+          import importlib.metadata as md, os, platform, sys
+          from pathlib import Path
+          assert platform.machine() == 'aarch64' and sys.version_info[:2] == (3,12)
+          print('NATIVE_PYTHON=' + platform.python_version())
+          for line in (Path(os.environ['RUNNER_TEMP'])/'native/requirements.txt').read_text().splitlines():
+              line=line.strip()
+              if not line or line.startswith('#'): continue
+              name,version=line.split('==')
+              assert md.version(name) == version, 'dependency_pin_mismatch'
+              print(name + '==' + version)
+          PY
+
+      - name: Verify actual POSIX modes and independent cross-user denial
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, pwd, stat, subprocess, tempfile
+          from pathlib import Path
+          base=Path(tempfile.mkdtemp(prefix='tpo-privacy-posix-',dir='/tmp'))
+          base.chmod(0o755)
+          private=base/'private'; private.mkdir(mode=0o700)
+          secret=base/'fictional-private.txt'; secret.write_text('fictional-only'); secret.chmod(0o600)
+          public=base/'public.txt'; public.write_text('fictional-public'); public.chmod(0o644)
+          assert stat.S_IMODE(private.stat().st_mode)==0o700 and stat.S_IMODE(secret.stat().st_mode)==0o600
+          assert secret.stat().st_uid == os.getuid() != pwd.getpwnam('nobody').pw_uid
+          code='''import os,sys
+          from pathlib import Path
+          base=Path(sys.argv[1])
+          assert os.getuid()==int(sys.argv[2])
+          assert (base/'public.txt').read_text()=='fictional-public'
+          for operation in (lambda:(base/'fictional-private.txt').read_text(), lambda:list((base/'private').iterdir())):
+              try: operation()
+              except PermissionError: pass
+              else: raise AssertionError('cross_user_access_not_denied')
+          '''
+          subprocess.run(['sudo','-n','-u','nobody','--','python3','-c',code,str(base),str(pwd.getpwnam('nobody').pw_uid)],check=True)
+          print('POSIX_MODE_AND_CROSS_USER_DENIAL_VERIFIED')
+          PY
+
+      - name: Execute the native tests and complete isolated suite with strict receipts
+        run: |
+          set -euo pipefail
+          for mode in native full; do
+            set +e
+            python -I -B qualification/privacy_exact_tip/run_suite.py "$RUNNER_TEMP/native" "$mode" 2>&1 | tee "$RUNNER_TEMP/$mode.log"
+            statuses=("${PIPESTATUS[@]}")
+            set -e
+            sed -n 's/^QUALIFICATION_RECEIPT=//p' "$RUNNER_TEMP/$mode.log" > "$RUNNER_TEMP/evidence/$mode.json"
+            echo "QUALIFICATION_PROCESS_EXIT=$mode:${statuses[0]} TEE_EXIT=${statuses[1]}"
+            test "${statuses[0]}" = 0 && test "${statuses[1]}" = 0
+            test -s "$RUNNER_TEMP/evidence/$mode.json"
+            cat "$RUNNER_TEMP/evidence/$mode.json" >> "$GITHUB_STEP_SUMMARY"
+          done
+          git -C "$RUNNER_TEMP/native" diff --exit-code "$CANDIDATE"
+          test "$(git -C "$RUNNER_TEMP/native" ls-files --others --exclude-standard)" = tests/integration/test_legacy_schema_migration.py
+          cmp qualification/privacy_exact_tip/test_legacy_schema_migration.py "$RUNNER_TEMP/native/tests/integration/test_legacy_schema_migration.py"
+
+      - name: Build the exact candidate in its unchanged production-style Dockerfile
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          arch=$(docker info --format '{{.Architecture}}')
+          test "$arch" = aarch64 || test "$arch" = arm64
+          test "$(git -C "$RUNNER_TEMP/appsrc" rev-parse HEAD)" = "$CANDIDATE"
+          test -z "$(git -C "$RUNNER_TEMP/appsrc" status --porcelain)"
+          docker build --platform linux/arm64 --progress plain \
+            --build-arg GIT_COMMIT="$CANDIDATE" --build-arg BUILD_DATE="$(date -u +%FT%TZ)" \
+            -t "tpo-privacy-qualification:$CANDIDATE" "$RUNNER_TEMP/appsrc"
+          docker image inspect "tpo-privacy-qualification:$CANDIDATE" --format 'IMAGE_ID={{.Id}} ARCH={{.Architecture}} OS={{.Os}}'
+          test "$(docker image inspect "tpo-privacy-qualification:$CANDIDATE" --format '{{.Architecture}}')" = arm64
+          test "$(docker image inspect "tpo-privacy-qualification:$CANDIDATE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$CANDIDATE"
+
+      - name: Create and verify the offline smoke container before starting
+        run: |
+          set -euo pipefail
+          docker create --name privacy-exact-tip-smoke --rm --network none --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,size=1073741824 --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 256 --memory 2g \
+            -e DB_PATH=/tmp/privacy-smoke.sqlite -e STATE_FILE=/tmp/unused-fictional-state.json \
+            -e DELIVERY_DRAIN_INTERVAL_SECONDS=0 -e PYTHONPATH=/app -e PYTHONDONTWRITEBYTECODE=1 \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/qualification/privacy_exact_tip,dst=/qualification,readonly" \
+            --entrypoint python "tpo-privacy-qualification:$CANDIDATE" /qualification/container_smoke.py
+          docker inspect privacy-exact-tip-smoke | python -c '
+          import json,os,sys
+          c=json.load(sys.stdin)[0]; h=c["HostConfig"]; m=c["Mounts"]
+          assert h["NetworkMode"]=="none" and h["ReadonlyRootfs"] and not h["Privileged"]
+          assert h["CapDrop"]==["ALL"] and "no-new-privileges" in h["SecurityOpt"]
+          assert not h["Devices"] and not h["VolumesFrom"] and h["PidMode"]!="host"
+          assert c["Config"]["Entrypoint"]==["python"] and c["Config"]["Cmd"]==["/qualification/container_smoke.py"]
+          assert c["Image"] and c["Config"]["Labels"]["org.opencontainers.image.revision"]==os.environ["CANDIDATE"]
+          binds=[v for v in m if v["Type"]=="bind"]
+          assert len(binds)==1 and all(v["Type"] in ("bind","tmpfs") for v in m)
+          assert binds[0]["Destination"]=="/qualification" and not binds[0]["RW"]
+          assert binds[0]["Source"]==os.environ["GITHUB_WORKSPACE"]+"/qualification/privacy_exact_tip"
+          assert set(h["Tmpfs"])=={"/tmp"}
+          print("CONTAINER_ISOLATION_VERIFIED")'
+
+      - name: Execute image privacy, SQLite, API and real Chromium smoke once
+        run: |
+          set -euo pipefail
+          set +e
+          docker start --attach privacy-exact-tip-smoke 2>&1 | tee "$RUNNER_TEMP/container-smoke.log"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          sed -n 's/^CONTAINER_SMOKE_RECEIPT=//p' "$RUNNER_TEMP/container-smoke.log" > "$RUNNER_TEMP/evidence/container.json"
+          sed -n 's/^CONTAINER_PRIVACY_RECEIPT=//p' "$RUNNER_TEMP/container-smoke.log" > "$RUNNER_TEMP/evidence/container-privacy.json"
+          echo "CONTAINER_PROCESS_EXIT=${statuses[0]} TEE_EXIT=${statuses[1]}"
+          test "${statuses[0]}" = 0 && test "${statuses[1]}" = 0
+          python -c 'import json,os,pathlib; d=pathlib.Path(os.environ["RUNNER_TEMP"])/"evidence"; assert json.loads((d/"container.json").read_text())["qualified"]; assert json.loads((d/"container-privacy.json").read_text())["qualified"]'
+          cat "$RUNNER_TEMP/evidence/container.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify disposable container cleanup, including stopped containers
+        if: always()
+        run: |
+          set -euo pipefail
+          if docker container inspect privacy-exact-tip-smoke >/dev/null 2>&1; then
+            docker rm -f privacy-exact-tip-smoke
+          fi
+          leftovers=$(docker ps -a --filter 'name=^/privacy-exact-tip-smoke$' --format '{{.ID}}')
+          test -z "$leftovers"
+          echo 'DISPOSABLE_CONTAINER_ABSENT'
+
+      - name: Preserve sanitized numeric receipts only
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: privacy-exact-tip-receipts
+          path: ${{ runner.temp }}/evidence/*.json
+          if-no-files-found: error
+          retention-days: 14
