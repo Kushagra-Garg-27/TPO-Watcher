@@ -1,0 +1,278 @@
+name: Hardened MFA ARM64 Qualification (Gate D)
+
+# Single-purpose, one-time qualification of the hardened MFA candidate (b220708)
+# on a genuine GitHub-hosted ARM64 runner. Read-only, secret-free, deploy-free.
+# Triggers ONLY on the dedicated qualification branch created for this candidate.
+
+'on':
+  push:
+    branches:
+      - codex/arm64-mfa-qualification-20261025
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arm64-mfa-qualification-gate-d
+  cancel-in-progress: false
+
+jobs:
+  arm64-qualification:
+    name: Native aarch64 isolated qualification suite
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      CANDIDATE: "b2207086a92dafff8f834ca690a77bd376e74c03"
+      EXPECTED_TREE: "cd0c1cce4d06210f292ed26fbc37e1aad2a93b22"
+      PROD_REF: "053b152b37d8aea8d5b4c74606765cdc73565136"
+      PRIVACY_REF: "e761f8d47d8f3827c685bcecd7aab6adf5afe378"
+    steps:
+      - name: Fail fast unless the runner is genuinely aarch64
+        run: |
+          set -euo pipefail
+          uname -a
+          test "$(uname -m)" = "aarch64"
+
+      - name: Record Linux distribution and kernel
+        run: |
+          set -euo pipefail
+          cat /etc/os-release
+          uname -r
+
+      - name: Checkout qualification source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact candidate lineage and unchanged application bytes
+        run: |
+          set -euo pipefail
+          echo "HEAD:        $(git rev-parse HEAD)"
+          echo "HEAD tree:   $(git rev-parse 'HEAD^{tree}')"
+          git merge-base --is-ancestor "$PROD_REF" HEAD || {
+            echo "::error::production reference $PROD_REF is not an ancestor"; exit 1; }
+          git merge-base --is-ancestor "$PRIVACY_REF" HEAD || {
+            echo "::error::privacy baseline $PRIVACY_REF is not an ancestor"; exit 1; }
+          git merge-base --is-ancestor "$CANDIDATE" HEAD || {
+            echo "::error::candidate $CANDIDATE is not an ancestor of this branch"; exit 1; }
+          test "$(git rev-parse "$CANDIDATE^{tree}")" = "$EXPECTED_TREE" || {
+            echo "::error::candidate tree hash mismatch"; exit 1; }
+
+          # Qualification branch may add qualification tooling/docs only.
+          # Application, tests, requirements, frontend, and Dockerfile must be byte-identical to candidate.
+          CHANGED=$(git diff --name-only "$CANDIDATE"..HEAD -- app/ requirements.txt frontend/ docker-compose.yml Dockerfile)
+          if [ -n "$CHANGED" ]; then
+            echo "::error::qualification branch modifies candidate application bytes:" $CHANGED
+            exit 1
+          fi
+          echo "Candidate verified: $CANDIDATE (tree $EXPECTED_TREE)."
+
+      - name: Set up CPython 3.12
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.12"
+
+      - name: Prepare clean native test worktree and install pinned dependencies
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          git worktree add --detach "$RUNNER_TEMP/native" "$CANDIDATE"
+          test "$(git -C "$RUNNER_TEMP/native" rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          python -m pip install -r "$RUNNER_TEMP/native/requirements.txt"
+          echo "--- Installed Python dependencies:"
+          python -m pip freeze
+
+      - name: Verify CPython 3.12 interpreter and all 13 dependency pins
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import importlib.metadata as md, os, platform, sys
+          from pathlib import Path
+          assert platform.machine() == 'aarch64' and sys.version_info[:2] == (3, 12), f"Expected CPython 3.12 aarch64, got {sys.version}"
+          print('NATIVE_PYTHON=' + platform.python_version())
+          reqs = (Path(os.environ['RUNNER_TEMP'])/'native/requirements.txt').read_text().splitlines()
+          checked = 0
+          for line in reqs:
+              line = line.strip()
+              if not line or line.startswith('#'): continue
+              name, version = line.split('==', 1)
+              distribution_name = name.split('[', 1)[0]
+              assert md.version(distribution_name) == version, f"Metadata mismatch: {distribution_name} {md.version(distribution_name)} != {version}"
+              print(f"VERIFIED_PIN: {name}=={version}")
+              checked += 1
+          assert checked == 13, f"Expected 13 pinned dependencies, checked {checked}"
+          print("ALL_13_DEPENDENCY_PINS_VERIFIED")
+          PY
+
+      - name: Verify actual POSIX modes and independent cross-user denial
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, pwd, stat, subprocess, tempfile
+          from pathlib import Path
+          base = Path(tempfile.mkdtemp(prefix='tpo-mfa-posix-', dir='/tmp'))
+          base.chmod(0o755)
+          private_dir = base / 'data'
+          private_dir.mkdir(mode=0o700)
+          os.chmod(str(private_dir), 0o700)
+          secret_file = private_dir / 'playwright_state.json'
+          secret_file.write_text('{"cookies":[{"name":"auth","value":"fictional"}]}')
+          os.chmod(str(secret_file), 0o600)
+          public_file = base / 'public.txt'
+          public_file.write_text('fictional-public')
+          os.chmod(str(public_file), 0o644)
+
+          assert stat.S_IMODE(private_dir.stat().st_mode) == 0o700, "0700 dir mode not enforced"
+          assert stat.S_IMODE(secret_file.stat().st_mode) == 0o600, "0600 file mode not enforced"
+          assert secret_file.stat().st_uid == os.getuid() != pwd.getpwnam('nobody').pw_uid
+
+          code = '''import os, sys
+          from pathlib import Path
+          base = Path(sys.argv[1])
+          assert os.getuid() == int(sys.argv[2])
+          assert (base / 'public.txt').read_text() == 'fictional-public'
+          for op in (lambda: (base / 'data' / 'playwright_state.json').read_text(), lambda: list((base / 'data').iterdir())):
+              try: op()
+              except PermissionError: pass
+              else: raise AssertionError('cross_user_access_not_denied')
+          '''
+          subprocess.run(['sudo', '-n', '-u', 'nobody', '--', 'python3', '-c', code, str(base), str(pwd.getpwnam('nobody').pw_uid)], check=True)
+          print('POSIX_MODE_AND_CROSS_USER_DENIAL_VERIFIED')
+          PY
+
+      - name: Execute native tests and complete isolated suite with strict receipts
+        run: |
+          set -euo pipefail
+          # Execute native tests (must pass, not skip)
+          python -I -B qualification/mfa_exact_tip/run_suite.py "$RUNNER_TEMP/native" native 2>&1 | tee "$RUNNER_TEMP/native.log"
+          sed -n 's/^QUALIFICATION_RECEIPT=//p' "$RUNNER_TEMP/native.log" > "$RUNNER_TEMP/evidence/native.json"
+          test -s "$RUNNER_TEMP/evidence/native.json"
+          python -c 'import json, os, pathlib; d=pathlib.Path(os.environ["RUNNER_TEMP"])/"evidence"; rec=json.loads((d/"native.json").read_text()); assert rec["qualified"] and rec["passed"] == 2 and rec["skipped"] == 0'
+
+          # Include approved migration overlay and run complete full suite
+          cp qualification/mfa_exact_tip/test_legacy_schema_migration.py "$RUNNER_TEMP/native/tests/integration/test_legacy_schema_migration.py"
+          python -I -B qualification/mfa_exact_tip/run_suite.py "$RUNNER_TEMP/native" full 2>&1 | tee "$RUNNER_TEMP/full.log"
+          sed -n 's/^QUALIFICATION_RECEIPT=//p' "$RUNNER_TEMP/full.log" > "$RUNNER_TEMP/evidence/full.json"
+          test -s "$RUNNER_TEMP/evidence/full.json"
+          python -c 'import json, os, pathlib; d=pathlib.Path(os.environ["RUNNER_TEMP"])/"evidence"; rec=json.loads((d/"full.json").read_text()); assert rec["qualified"] and rec["passed"] == 1374 and rec["skipped"] == 0 and rec["failed"] == 0'
+
+          # Verify native worktree has no unintended modifications
+          git -C "$RUNNER_TEMP/native" diff --exit-code "$CANDIDATE"
+          test "$(git -C "$RUNNER_TEMP/native" ls-files --others --exclude-standard)" = "tests/integration/test_legacy_schema_migration.py"
+          cmp qualification/mfa_exact_tip/test_legacy_schema_migration.py "$RUNNER_TEMP/native/tests/integration/test_legacy_schema_migration.py"
+          cat "$RUNNER_TEMP/evidence/native.json" >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/evidence/full.json" >> "$GITHUB_STEP_SUMMARY"
+
+  arm64-container-smoke:
+    name: Native linux/arm64 container build and offline smoke
+    needs: arm64-qualification
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      CANDIDATE: "b2207086a92dafff8f834ca690a77bd376e74c03"
+      EXPECTED_TREE: "cd0c1cce4d06210f292ed26fbc37e1aad2a93b22"
+    steps:
+      - name: Fail fast unless the runner is genuinely aarch64
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "aarch64"
+
+      - name: Checkout qualification source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare clean build context from immutable candidate commit
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          git worktree add --detach "$RUNNER_TEMP/appsrc" "$CANDIDATE"
+          test "$(git -C "$RUNNER_TEMP/appsrc" rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          test -z "$(git -C "$RUNNER_TEMP/appsrc" status --porcelain)"
+          echo "Pristine candidate build context verified at $RUNNER_TEMP/appsrc."
+
+      - name: Build runtime Docker image (linux/arm64, no registry push)
+        run: |
+          set -euo pipefail
+          arch=$(docker info --format '{{.Architecture}}')
+          test "$arch" = aarch64 || test "$arch" = arm64
+          docker build --platform linux/arm64 --progress plain \
+            --build-arg GIT_COMMIT="$CANDIDATE" --build-arg BUILD_DATE="$(date -u +%FT%TZ)" \
+            -t "tpo-mfa-qualification:$CANDIDATE" "$RUNNER_TEMP/appsrc"
+          docker image inspect "tpo-mfa-qualification:$CANDIDATE" --format 'IMAGE_ID={{.Id}} ARCH={{.Architecture}} OS={{.Os}}'
+          test "$(docker image inspect "tpo-mfa-qualification:$CANDIDATE" --format '{{.Architecture}}')" = arm64
+          test "$(docker image inspect "tpo-mfa-qualification:$CANDIDATE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$CANDIDATE"
+
+      - name: Create and verify offline smoke container before starting
+        run: |
+          set -euo pipefail
+          docker create --name mfa-exact-tip-smoke --rm --network none --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,size=1073741824 --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 256 --memory 2g \
+            -e DB_PATH=/tmp/mfa-smoke.sqlite -e STATE_FILE=/tmp/unused-fictional-state.json \
+            -e DELIVERY_DRAIN_INTERVAL_SECONDS=0 -e PYTHONPATH=/app -e PYTHONDONTWRITEBYTECODE=1 \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/qualification/mfa_exact_tip,dst=/qualification,readonly" \
+            --entrypoint python "tpo-mfa-qualification:$CANDIDATE" /qualification/container_smoke.py
+
+          docker inspect mfa-exact-tip-smoke | python -c '
+          import json, os, sys
+          c = json.load(sys.stdin)[0]; h = c["HostConfig"]; m = c["Mounts"]
+          assert h["NetworkMode"] == "none" and h["ReadonlyRootfs"] and not h["Privileged"]
+          assert h["CapDrop"] == ["ALL"] and "no-new-privileges" in h["SecurityOpt"]
+          assert not h["Devices"] and not h["VolumesFrom"] and h["PidMode"] != "host"
+          assert c["Config"]["Entrypoint"] == ["python"] and c["Config"]["Cmd"] == ["/qualification/container_smoke.py"]
+          assert c["Image"] and c["Config"]["Labels"]["org.opencontainers.image.revision"] == os.environ["CANDIDATE"]
+          binds = [v for v in m if v["Type"] == "bind"]
+          assert len(binds) == 1 and all(v["Type"] in ("bind", "tmpfs") for v in m)
+          assert binds[0]["Destination"] == "/qualification" and not binds[0]["RW"]
+          assert binds[0]["Source"] == os.environ["GITHUB_WORKSPACE"] + "/qualification/mfa_exact_tip"
+          assert set(h["Tmpfs"]) == {"/tmp"}
+          print("CONTAINER_ISOLATION_VERIFIED")'
+
+      - name: Execute image MFA, privacy, SQLite, API and real Chromium smoke once
+        run: |
+          set -euo pipefail
+          set +e
+          docker start --attach mfa-exact-tip-smoke 2>&1 | tee "$RUNNER_TEMP/container-smoke.log"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          sed -n 's/^CONTAINER_SMOKE_RECEIPT=//p' "$RUNNER_TEMP/container-smoke.log" > "$RUNNER_TEMP/evidence/container.json"
+          sed -n 's/^CONTAINER_MFA_RECEIPT=//p' "$RUNNER_TEMP/container-smoke.log" > "$RUNNER_TEMP/evidence/container-mfa.json"
+          sed -n 's/^CONTAINER_PRIVACY_RECEIPT=//p' "$RUNNER_TEMP/container-smoke.log" > "$RUNNER_TEMP/evidence/container-privacy.json"
+          echo "CONTAINER_PROCESS_EXIT=${statuses[0]} TEE_EXIT=${statuses[1]}"
+          test "${statuses[0]}" = 0 && test "${statuses[1]}" = 0
+          python -c '
+          import json, os, pathlib
+          d = pathlib.Path(os.environ["RUNNER_TEMP"]) / "evidence"
+          assert json.loads((d / "container.json").read_text())["qualified"]
+          assert json.loads((d / "container-mfa.json").read_text())["qualified"]
+          assert json.loads((d / "container-privacy.json").read_text())["qualified"]
+          print("ALL_CONTAINER_RECEIPTS_QUALIFIED")
+          '
+          cat "$RUNNER_TEMP/evidence/container.json" >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/evidence/container-mfa.json" >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/evidence/container-privacy.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify disposable container cleanup, including stopped containers
+        if: always()
+        run: |
+          set -euo pipefail
+          if docker container inspect mfa-exact-tip-smoke >/dev/null 2>&1; then
+            docker rm -f mfa-exact-tip-smoke
+          fi
+          leftovers=$(docker ps -a --filter 'name=^/mfa-exact-tip-smoke$' --format '{{.ID}}')
+          test -z "$leftovers"
+          echo 'DISPOSABLE_CONTAINER_CLEANUP_VERIFIED'
+
+      - name: Preserve sanitized numeric receipts only
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: mfa-exact-tip-receipts
+          path: ${{ runner.temp }}/evidence/*.json
+          if-no-files-found: error
+          retention-days: 14
