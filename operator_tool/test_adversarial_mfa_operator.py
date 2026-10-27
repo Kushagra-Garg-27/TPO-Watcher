@@ -472,12 +472,63 @@ async def run_adversarial_suite():
         # ---- symlink safety ----
         dest_15 = os.path.join(session_dir, "symlink_dest.json")
         real_target = os.path.join(session_dir, "real_target.json")
-        Path(real_target).touch()
+        sentinel_payload = "pre_existing_unmodified_target_content"
+        with open(real_target, "w", encoding="utf-8") as f:
+            f.write(sentinel_payload)
+        orig_target_mtime_ns = os.stat(real_target).st_mtime_ns
+
         try:
             os.symlink(real_target, dest_15)
-            st, _ = MFAOperatorTool(base_url, dest_15).provision_session("valid_user", cb_pwd_valid, cb_otp_valid)
+
+            # Positive execution: await the async provisioning call (Defect A corrected)
+            st, _ = await MFAOperatorTool(base_url, dest_15).provision_session("valid_user", cb_pwd_valid, cb_otp_valid)
+
+            # Security contract verification (Defect B corrected):
+            # 1. Tool rejects symlink destination with SYMLINK_REJECTED
+            # 2. Existing symlink is untouched (still a symlink pointing to real_target)
+            # 3. Target file is untouched (sentinel content preserved, mtime preserved)
+            # 4. Zero stray staging directories remain
+            is_symlink = os.path.islink(dest_15)
+            link_target_matches = False
+            try:
+                link_target_matches = os.readlink(dest_15) == real_target
+            except OSError:
+                pass
+            target_content_unmodified = False
+            try:
+                with open(real_target, "r", encoding="utf-8") as f:
+                    target_content_unmodified = f.read() == sentinel_payload
+            except OSError:
+                pass
+            target_mtime_unmodified = (
+                os.stat(real_target).st_mtime_ns == orig_target_mtime_ns
+                if os.path.exists(real_target) else False
+            )
+            stray_stages = [f for f in os.listdir(session_dir) if f.startswith(".mfa_stage_")]
+
             check("18 [FS] Symlinked destination rejected",
-                  st == ProvisioningStatus.SYMLINK_REJECTED and not os.path.exists(dest_15), f"{st}")
+                  st == ProvisioningStatus.SYMLINK_REJECTED
+                  and is_symlink
+                  and link_target_matches
+                  and target_content_unmodified
+                  and target_mtime_unmodified
+                  and len(stray_stages) == 0,
+                  f"st={st} is_link={is_symlink} target_matches={link_target_matches} "
+                  f"target_unmodified={target_content_unmodified} stages={len(stray_stages)}")
+
+            # Negative control: verify predicate would fail if tool accepted or modified destination
+            def evaluate_symlink_safety(status, link_path, target_path, expected_content):
+                return (
+                    status == ProvisioningStatus.SYMLINK_REJECTED
+                    and os.path.islink(link_path)
+                    and os.readlink(link_path) == target_path
+                    and open(target_path, "r", encoding="utf-8").read() == expected_content
+                )
+            neg_accepted = evaluate_symlink_safety(ProvisioningStatus.SUCCESS, dest_15, real_target, sentinel_payload)
+            neg_modified = evaluate_symlink_safety(ProvisioningStatus.SYMLINK_REJECTED, dest_15, real_target, "corrupt_data")
+            neg_regular = evaluate_symlink_safety(ProvisioningStatus.SYMLINK_REJECTED, real_target, real_target, sentinel_payload)
+            check("18-ctrl [FS] Negative control catches accepted or modified symlink target",
+                  neg_accepted is False and neg_modified is False and neg_regular is False)
         except (OSError, NotImplementedError):
             defer("18 symlinked-destination rejection", "symlink creation unavailable on unprivileged Windows")
 
@@ -489,8 +540,12 @@ async def run_adversarial_suite():
                 os.symlink(real_dir, link_dir)
             dest_15b = os.path.join(link_dir, "state.json")
             safe, code, _ = validate_destination_safety(dest_15b)
+            st_15b, _ = await MFAOperatorTool(base_url, dest_15b).provision_session("valid_user", cb_pwd_valid, cb_otp_valid)
             check("18b [FS] Symlinked ancestor directory rejected",
-                  safe is False and code == "DESTINATION_UNSAFE", f"safe={safe} code={code}")
+                  safe is False and code == "DESTINATION_UNSAFE"
+                  and st_15b == ProvisioningStatus.DESTINATION_UNSAFE
+                  and not os.path.exists(dest_15b),
+                  f"safe={safe} code={code} st={st_15b}")
         except (OSError, NotImplementedError):
             defer("18b symlinked-ancestor rejection", "directory-symlink creation unavailable on unprivileged Windows")
 
@@ -600,12 +655,13 @@ async def run_adversarial_suite():
             preserved = open(dest_26, "r", encoding="utf-8").read() == original_payload
             if os.name == "nt":
                 # Windows: readonly destination blocks os.replace -> PERSISTENCE_ERROR.
-                expected = ProvisioningStatus.PERSISTENCE_ERROR
+                expected = (ProvisioningStatus.PERSISTENCE_ERROR,)
             else:
-                # POSIX: read-only parent dir blocks staging -> PERSISTENCE_ERROR earlier.
-                expected = ProvisioningStatus.PERSISTENCE_ERROR
+                # POSIX: read-only parent dir blocks lock file creation -> LOCK_ACQUISITION_FAILED
+                # (or staging creation -> PERSISTENCE_ERROR). Both are fail-closed states.
+                expected = (ProvisioningStatus.LOCK_ACQUISITION_FAILED, ProvisioningStatus.PERSISTENCE_ERROR)
             check("26 [FS] Publication permission failure is fail-closed; existing bytes preserved",
-                  st == expected and preserved, f"st={st} preserved={preserved}")
+                  st in expected and preserved, f"st={st} preserved={preserved}")
         finally:
             if os.name == "nt":
                 os.chmod(dest_26, stat_result.st_mode | stat_module.S_IWRITE)

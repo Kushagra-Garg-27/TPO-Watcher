@@ -82,7 +82,7 @@ case "$*" in
 esac
 exit 0
 """
-    python3_sh = "#!/bin/sh\nexec python \"$@\"\n"
+    python3_sh = f"#!/bin/sh\nexec {sys.executable} \"$@\"\n"
 
     for name, content in (("git", git_sh), ("docker", docker_sh), ("python3", python3_sh)):
         path = os.path.join(bin_dir, name)
