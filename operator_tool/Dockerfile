@@ -55,7 +55,8 @@ COPY . /opt/operator_tool/
 # authorized one-time setup must create /app/data/session owned by uid 1000
 # with mode 0700 BEFORE first use - see
 # reports/TPO_WATCHER_STAGE_C2_ARM64_EXACT_TIP_PREPARATION.md section 4.
-RUN useradd --create-home --uid 1000 operator
+RUN groupadd --gid 1000 operator-user \
+    && useradd --create-home --uid 1000 --gid operator-user operator
 USER operator
 WORKDIR /home/operator
 
