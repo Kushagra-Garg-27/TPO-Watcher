@@ -45,7 +45,6 @@ COPY requirements.txt /opt/operator_tool/requirements.txt
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 RUN pip install --no-cache-dir -r requirements.txt \
     && playwright install --with-deps chromium \
-    && playwright cache prune \
     && chmod -R a+rX /opt/ms-playwright
 
 COPY . /opt/operator_tool/
