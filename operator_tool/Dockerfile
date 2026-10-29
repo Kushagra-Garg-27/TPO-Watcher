@@ -34,6 +34,7 @@ RUN apt-get update \
         libxkbcommon0 \
         libxrandr2 \
         libxshmfence1 \
+        procps \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/operator_tool

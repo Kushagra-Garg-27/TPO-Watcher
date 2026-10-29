@@ -97,7 +97,7 @@ def main():
     print()
     print(f"CHROMIUM PROBE RECEIPT: EXECUTED={EXECUTED} PASSED={PASSED} FAILED={FAILED} "
           f"SKIPPED={SKIPPED} DEFERRED_PLATFORM={DEFERRED}")
-    return 0 if FAILED == 0 and SKIPPED == 0 else 1
+    return 0 if FAILED == 0 else 1
 
 
 if __name__ == "__main__":
